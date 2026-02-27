@@ -1,0 +1,17 @@
+[project]
+name = "anxious-intelligence"
+version = "0.1.0"
+description = "A system architecture for persistent dissonance-driven AI"
+requires-python = ">=3.10"
+dependencies = [
+    "asyncpg>=0.29",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "rich>=13.0",
+]
+
+[project.scripts]
+anxious = "src.cli:main"
