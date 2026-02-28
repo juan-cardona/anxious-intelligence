@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anxious Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0C0C0C; --bg-2: #141414; --bg-3: #1a1a1a; --bg-4: #222;
+      --fg: #fafafa; --fg-2: #a0a0a0; --fg-3: #666;
+      --accent: #FF6B35; --accent-2: #FF8C5A;
+      --green: #22c55e; --red: #ef4444; --yellow: #eab308;
+      --cyan: #06b6d4; --magenta: #d946ef;
+      --border: #2a2a2a; --border-2: #333;
+      --radius: 12px; --radius-sm: 8px;
+      --font: 'Inter', -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+      --sidebar-w: 240px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: var(--font); background: var(--bg); color: var(--fg); min-height: 100vh; display: flex; }
+
+    /* ── Sidebar ───────────────────────────────── */
+    .sidebar {
+      width: var(--sidebar-w); border-right: 1px solid var(--border);
+      background: var(--bg); display: flex; flex-direction: column;
+      position: fixed; top: 0; bottom: 0; z-index: 10;
+    }
+    .sidebar-brand {
+      padding: 20px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .sidebar-brand .dots { display: flex; gap: 6px; }
+    .sidebar-brand .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .sidebar-brand .dot-r { background: var(--red); }
+    .sidebar-brand .dot-y { background: var(--yellow); }
+    .sidebar-brand .dot-g { background: var(--green); }
+    .sidebar-brand h1 { font-family: var(--mono); font-size: 14px; font-weight: 500; letter-spacing: 0.5px; }
+
+    .sidebar-nav { flex: 1; padding: 12px 0; overflow-y: auto; }
+    .nav-group { padding: 0 12px; margin-bottom: 16px; }
+    .nav-group-label { font-size: 10px; text-transform: uppercase; color: var(--fg-3); letter-spacing: 1px; padding: 0 8px; margin-bottom: 4px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      border-radius: var(--radius-sm); cursor: pointer; font-size: 13px;
+      color: var(--fg-2); transition: all 0.15s;
+    }
+    .nav-item:hover { background: var(--bg-3); color: var(--fg); }
+    .nav-item.active { background: var(--bg-3); color: var(--fg); font-weight: 500; }
+    .nav-item .badge {
+      margin-left: auto; font-size: 11px; padding: 1px 6px;
+      border-radius: 99px; font-family: var(--mono);
+    }
+    .badge-red { background: rgba(239,68,68,0.15); color: var(--red); }
+    .badge-green { background: rgba(34,197,94,0.15); color: var(--green); }
+    .badge-yellow { background: rgba(234,179,8,0.15); color: var(--yellow); }
+
+    .sidebar-status {
+      padding: 12px 16px; border-top: 1px solid var(--border);
+      font-size: 11px; color: var(--fg-3); font-family: var(--mono);
+    }
+
+    /* ── Main ──────────────────────────────────── */
+    .main { margin-left: var(--sidebar-w); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+    .topbar {
+      height: 48px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 24px; gap: 12px;
+    }
+    .topbar-title { font-size: 14px; font-weight: 600; }
+    .topbar-subtitle { font-size: 12px; color: var(--fg-3); }
+    .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .connection-badge {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px;
+      font-family: var(--mono); display: flex; align-items: center; gap: 4px;
+    }
+    .connection-badge.connected { background: rgba(34,197,94,0.1); color: var(--green); }
+    .connection-badge.disconnected { background: rgba(239,68,68,0.1); color: var(--red); }
+    .connection-badge .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    .content { flex: 1; padding: 24px; overflow-y: auto; }
+
+    /* ── Cards ─────────────────────────────────── */
+    .card {
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+    }
+    .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .card-title { font-size: 14px; font-weight: 600; }
+    .card-subtitle { font-size: 12px; color: var(--fg-3); }
+
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .stat-card {
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px;
+    }
+    .stat-label { font-size: 11px; color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .stat-value { font-size: 24px; font-weight: 700; font-family: var(--mono); }
+    .stat-detail { font-size: 11px; color: var(--fg-3); margin-top: 2px; }
+
+    /* ── Tension Bar ──────────────────────────── */
+    .tension-bar { display: flex; height: 6px; border-radius: 3px; background: var(--bg-4); overflow: hidden; }
+    .tension-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+    .tension-low { background: var(--green); }
+    .tension-mid { background: var(--yellow); }
+    .tension-high { background: var(--red); }
+
+    .dissatisfaction-bar { height: 8px; border-radius: 4px; background: var(--bg-4); overflow: hidden; margin: 8px 0; }
+    .dissatisfaction-fill { height: 100%; border-radius: 4px; transition: width 0.8s ease; }
+
+    /* ── Beliefs Table ────────────────────────── */
+    .beliefs-table { width: 100%; border-collapse: collapse; }
+    .beliefs-table th {
+      text-align: left; font-size: 11px; color: var(--fg-3); padding: 8px 12px;
+      border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .beliefs-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .beliefs-table tr:hover td { background: var(--bg-3); }
+    .belief-content { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .belief-domain {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      background: var(--bg-4); color: var(--fg-2); font-family: var(--mono);
+    }
+    .mono { font-family: var(--mono); font-size: 12px; }
+
+    /* ── Graph ─────────────────────────────────── */
+    .graph-canvas { width: 100%; height: 500px; background: var(--bg-2); border-radius: var(--radius); border: 1px solid var(--border); }
+
+    /* ── Chat ──────────────────────────────────── */
+    .chat-container { display: flex; flex-direction: column; height: calc(100vh - 48px); }
+    .chat-messages { flex: 1; overflow-y: auto; padding: 16px 0; }
+    .chat-msg { padding: 8px 24px; display: flex; gap: 12px; }
+    .chat-msg-user { justify-content: flex-end; }
+    .chat-bubble {
+      max-width: 70%; padding: 12px 16px; border-radius: var(--radius);
+      font-size: 14px; line-height: 1.5;
+    }
+    .chat-bubble-user { background: var(--fg); color: var(--bg); }
+    .chat-bubble-ai { background: var(--bg-3); border: 1px solid var(--border); }
+    .chat-input-container { padding: 16px 24px; border-top: 1px solid var(--border); }
+    .chat-input {
+      width: 100%; padding: 12px 16px; background: var(--bg-3); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--fg); font-family: var(--font); font-size: 14px;
+      outline: none; resize: none;
+    }
+    .chat-input:focus { border-color: var(--accent); }
+    .chat-meta { font-size: 11px; color: var(--fg-3); padding: 4px 16px; font-family: var(--mono); }
+
+    /* ── Revision Cards ───────────────────────── */
+    .revision-card {
+      background: var(--bg-2); border: 1px solid rgba(239,68,68,0.3);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 12px;
+    }
+    .revision-card .old { color: var(--red); text-decoration: line-through; opacity: 0.7; }
+    .revision-card .new { color: var(--green); font-weight: 500; }
+
+    /* ── Edge Table ────────────────────────────── */
+    .edge-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; }
+    .edge-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-family: var(--mono); }
+    .edge-seed { background: rgba(6,182,212,0.15); color: var(--cyan); }
+    .edge-discovered { background: rgba(234,179,8,0.15); color: var(--yellow); }
+    .edge-relation { font-family: var(--mono); min-width: 100px; }
+    .rel-supports { color: var(--green); }
+    .rel-contradicts { color: var(--red); }
+    .rel-depends_on { color: var(--cyan); }
+    .rel-generalizes { color: var(--yellow); }
+    .rel-tension_shares { color: var(--magenta); }
+
+    /* ── Config ────────────────────────────────── */
+    .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .config-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .config-key { font-family: var(--mono); font-size: 12px; color: var(--fg-2); }
+    .config-val { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+
+    /* ── Timeline ──────────────────────────────── */
+    .timeline-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .timeline-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .timeline-time { font-family: var(--mono); font-size: 11px; color: var(--fg-3); min-width: 150px; }
+
+    /* ── Loading ───────────────────────────────── */
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-page { display: flex; align-items: center; justify-content: center; height: 60vh; flex-direction: column; gap: 12px; color: var(--fg-3); }
+
+    /* ── Mobile ────────────────────────────────── */
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .main { margin-left: 0; }
+      .stat-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="sidebar">
+  <div class="sidebar-brand">
+    <div class="dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+    <h1>anxious_</h1>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Control</div>
+      <div class="nav-item active" data-tab="overview">📊 Overview</div>
+      <div class="nav-item" data-tab="beliefs">🧠 Beliefs <span class="badge badge-green" id="beliefs-count">-</span></div>
+      <div class="nav-item" data-tab="graph">🕸️ Graph <span class="badge" id="edges-count">-</span></div>
+      <div class="nav-item" data-tab="dissatisfaction">😰 Dissatisfaction</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Interact</div>
+      <div class="nav-item" data-tab="chat">💬 Chat</div>
+      <div class="nav-item" data-tab="sessions">📋 Sessions</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">History</div>
+      <div class="nav-item" data-tab="revisions">⚡ Revisions <span class="badge badge-red" id="revisions-count">-</span></div>
+      <div class="nav-item" data-tab="timeline">📈 Timeline</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Settings</div>
+      <div class="nav-item" data-tab="config">⚙️ Config</div>
+    </div>
+  </div>
+  <div class="sidebar-status" id="sidebar-status">connecting...</div>
+</nav>
+
+<div class="main">
+  <div class="topbar">
+    <span class="topbar-title" id="page-title">Overview</span>
+    <span class="topbar-subtitle" id="page-subtitle"></span>
+    <div class="topbar-right">
+      <div class="connection-badge disconnected" id="conn-badge">
+        <div class="pulse"></div> <span id="conn-text">disconnected</span>
+      </div>
+    </div>
+  </div>
+  <div class="content" id="content">
+    <div class="loading-page"><div class="spinner"></div> Loading...</div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let ws = null;
+let currentTab = 'overview';
+let state = {};
+
+// ── WebSocket ──────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    setConnected(true);
+  };
+  ws.onclose = () => {
+    setConnected(false);
+    setTimeout(connectWS, 3000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleEvent(msg);
+  };
+}
+
+function setConnected(v) {
+  const badge = document.getElementById('conn-badge');
+  const text = document.getElementById('conn-text');
+  const status = document.getElementById('sidebar-status');
+  badge.className = 'connection-badge ' + (v ? 'connected' : 'disconnected');
+  text.textContent = v ? 'connected' : 'disconnected';
+  status.textContent = v ? '● connected' : '○ disconnected';
+}
+
+function handleEvent(msg) {
+  if (msg.event === 'init') {
+    state.dissatisfaction = msg.data.dissatisfaction;
+    state.beliefs_count = msg.data.beliefs_count;
+    state.high_tension = msg.data.high_tension;
+    updateSidebarBadges();
+  }
+  if (msg.event === 'revision' && currentTab === 'chat') {
+    appendRevisionToChat(msg.data);
+  }
+  if (msg.event === 'response' && currentTab === 'chat') {
+    removeThinking();
+    appendMessage('ai', msg.data.response, msg.data);
+  }
+}
+
+function updateSidebarBadges() {
+  const bc = document.getElementById('beliefs-count');
+  if (bc && state.beliefs_count != null) bc.textContent = state.beliefs_count;
+}
+
+// ── API ────────────────────────────────────────
+async function api(path) {
+  const r = await fetch(API + path);
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(API + path, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  });
+  return r.json();
+}
+
+// ── Navigation ─────────────────────────────────
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    el.classList.add('active');
+    currentTab = el.dataset.tab;
+    document.getElementById('page-title').textContent = el.textContent.trim().replace(/[^\w\s]/g, '').trim();
+    loadTab(currentTab);
+  });
+});
+
+async function loadTab(tab) {
+  const c = document.getElementById('content');
+  c.innerHTML = '<div class="loading-page"><div class="spinner"></div> Loading...</div>';
+  try {
+    switch(tab) {
+      case 'overview': return renderOverview(c);
+      case 'beliefs': return renderBeliefs(c);
+      case 'graph': return renderGraph(c);
+      case 'dissatisfaction': return renderDissatisfaction(c);
+      case 'chat': return renderChat(c);
+      case 'sessions': return renderSessions(c);
+      case 'revisions': return renderRevisions(c);
+      case 'timeline': return renderTimeline(c);
+      case 'config': return renderConfig(c);
+    }
+  } catch(err) {
+    c.innerHTML = `<div class="card"><div style="color:var(--red)">Error: ${err.message}</div></div>`;
+  }
+}
+
+// ── Tension bar helper ─────────────────────────
+function tensionBar(v, w='100%') {
+  const cls = v > 0.5 ? 'tension-high' : v > 0.2 ? 'tension-mid' : 'tension-low';
+  return `<div class="tension-bar" style="width:${w}"><div class="tension-bar-fill ${cls}" style="width:${(v*100).toFixed(0)}%"></div></div>`;
+}
+
+// ── Overview ───────────────────────────────────
+async function renderOverview(c) {
+  const d = await api('/api/overview');
+  state.beliefs_count = d.beliefs;
+  document.getElementById('beliefs-count').textContent = d.beliefs;
+  document.getElementById('revisions-count').textContent = d.revisions_total;
+  document.getElementById('edges-count').textContent = d.edges;
+  const dColor = d.dissatisfaction > 0.5 ? 'var(--red)' : d.dissatisfaction > 0.2 ? 'var(--yellow)' : 'var(--green)';
+
+  c.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">Dissatisfaction</div>
+        <div class="stat-value" style="color:${dColor}">${d.dissatisfaction.toFixed(4)}</div>
+        <div class="stat-detail">${d.dissatisfaction_state}</div>
+        <div class="dissatisfaction-bar"><div class="dissatisfaction-fill" style="width:${(d.dissatisfaction*100)}%;background:${dColor}"></div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Active Beliefs</div>
+        <div class="stat-value">${d.beliefs}</div>
+        <div class="stat-detail">${d.high_tension} with high tension</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Interactions</div>
+        <div class="stat-value">${d.interactions}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Revisions</div>
+        <div class="stat-value">${d.revisions_total}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Graph Edges</div>
+        <div class="stat-value">${d.edges}</div>
+        <div class="stat-detail">stored + discovered</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Dissatisfaction Breakdown</span></div>
+      ${d.breakdown.map(b => `
+        <div style="display:flex;align-items:center;gap:12px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="width:120px">${tensionBar(b.tension, '120px')}</div>
+          <span class="mono" style="min-width:40px">${Number(b.tension).toFixed(2)}</span>
+          <span style="flex:1;font-size:13px">${b.content}</span>
+          <span class="mono" style="color:var(--fg-3)">${Number(b.contribution).toFixed(3)}</span>
+        </div>
+      `).join('')}
+    </div>
+
+    ${d.recent_revisions.length ? `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Recent Revisions</span></div>
+      ${d.recent_revisions.map(r => `
+        <div class="revision-card">
+          <div class="old">${r.old_content}</div>
+          <div class="new" style="margin-top:4px">→ ${r.new_content}</div>
+          <div style="font-size:11px;color:var(--fg-3);margin-top:4px">tension=${Number(r.trigger_tension).toFixed(2)} • ${new Date(r.created_at).toLocaleString()}</div>
+        </div>
+      `).join('')}
+    </div>` : ''}
+  `;
+}
+
+// ── Beliefs ────────────────────────────────────
+async function renderBeliefs(c) {
+  const beliefs = await api('/api/beliefs');
+  c.innerHTML = `
+    <table class="beliefs-table">
+      <tr><th>Status</th><th>Tension</th><th>Conf.</th><th>Belief</th><th>Domain</th><th>Edges</th></tr>
+      ${beliefs.map(b => {
+        const icon = b.tension > 0.5 ? '🔴' : b.tension > 0.2 ? '🟡' : '🟢';
+        return `<tr>
+          <td>${icon}</td>
+          <td><div style="display:flex;align-items:center;gap:8px">${tensionBar(b.tension,'80px')} <span class="mono">${b.tension.toFixed(2)}</span></div></td>
+          <td class="mono">${b.confidence.toFixed(2)}</td>
+          <td class="belief-content">${b.content}</td>
+          <td><span class="belief-domain">${b.domain}</span></td>
+          <td class="mono">${b.connections}</td>
+        </tr>`;
+      }).join('')}
+    </table>
+  `;
+}
+
+// ── Graph ──────────────────────────────────────
+async function renderGraph(c) {
+  const g = await api('/api/graph');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">${g.nodes.length} nodes, ${g.edges.length} edges</span>
+      </div>
+      <canvas id="graph-canvas" class="graph-canvas"></canvas>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Edge List</span></div>
+      ${g.edges.map(e => `
+        <div class="edge-row">
+          <span class="edge-tag ${e.discovery_method === 'seed' ? 'edge-seed' : 'edge-discovered'}">${e.discovery_method === 'seed' ? '🌱 seed' : '🔍 discovered'}</span>
+          <span style="flex:1;font-size:12px">${e.source_content?.slice(0,35)}</span>
+          <span class="edge-relation rel-${e.relation}">${e.relation}</span>
+          <span style="flex:1;font-size:12px">→ ${e.target_content?.slice(0,35)}</span>
+          <span class="mono" style="color:var(--fg-3)">${e.strength.toFixed(1)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  drawGraph(g);
+}
+
+function drawGraph(g) {
+  const canvas = document.getElementById('graph-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.clientWidth; const H = canvas.clientHeight;
+  canvas.width = W * 2; canvas.height = H * 2;
+  ctx.scale(2, 2);
+
+  // Force-directed layout (simple)
+  const nodes = g.nodes.map((n, i) => ({
+    ...n,
+    x: W/2 + (Math.cos(i * 2 * Math.PI / g.nodes.length)) * Math.min(W, H) * 0.35,
+    y: H/2 + (Math.sin(i * 2 * Math.PI / g.nodes.length)) * Math.min(W, H) * 0.35,
+    vx: 0, vy: 0,
+  }));
+  const nodeMap = {};
+  nodes.forEach(n => nodeMap[n.id] = n);
+
+  // Simulate
+  for (let iter = 0; iter < 100; iter++) {
+    // Repulsion
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i+1; j < nodes.length; j++) {
+        let dx = nodes[j].x - nodes[i].x;
+        let dy = nodes[j].y - nodes[i].y;
+        let d = Math.sqrt(dx*dx + dy*dy) || 1;
+        let f = 5000 / (d * d);
+        nodes[i].vx -= (dx/d) * f; nodes[i].vy -= (dy/d) * f;
+        nodes[j].vx += (dx/d) * f; nodes[j].vy += (dy/d) * f;
+      }
+    }
+    // Attraction (edges)
+    g.edges.forEach(e => {
+      const a = nodeMap[e.source]; const b = nodeMap[e.target];
+      if (!a || !b) return;
+      let dx = b.x - a.x; let dy = b.y - a.y;
+      let d = Math.sqrt(dx*dx + dy*dy) || 1;
+      let f = (d - 120) * 0.01 * e.strength;
+      a.vx += (dx/d) * f; a.vy += (dy/d) * f;
+      b.vx -= (dx/d) * f; b.vy -= (dy/d) * f;
+    });
+    // Center gravity
+    nodes.forEach(n => {
+      n.vx += (W/2 - n.x) * 0.001;
+      n.vy += (H/2 - n.y) * 0.001;
+      n.vx *= 0.9; n.vy *= 0.9;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(40, Math.min(W-40, n.x));
+      n.y = Math.max(40, Math.min(H-40, n.y));
+    });
+  }
+
+  // Draw edges
+  const relColors = {supports:'#22c55e',contradicts:'#ef4444',depends_on:'#06b6d4',generalizes:'#eab308',tension_shares:'#d946ef'};
+  g.edges.forEach(e => {
+    const a = nodeMap[e.source]; const b = nodeMap[e.target];
+    if (!a || !b) return;
+    ctx.strokeStyle = relColors[e.relation] || '#444';
+    ctx.globalAlpha = 0.3 + e.strength * 0.5;
+    ctx.lineWidth = e.discovery_method === 'seed' ? 1 : 2;
+    if (e.discovery_method !== 'seed') ctx.setLineDash([4,4]); else ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  });
+
+  // Draw nodes
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  nodes.forEach(n => {
+    const r = 6 + n.importance * 10;
+    const color = n.tension > 0.5 ? '#ef4444' : n.tension > 0.2 ? '#eab308' : '#22c55e';
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+    // Label
+    ctx.fillStyle = '#a0a0a0'; ctx.font = '10px Inter';
+    ctx.textAlign = 'center';
+    ctx.fillText(n.content.slice(0, 25), n.x, n.y + r + 12);
+  });
+}
+
+// ── Dissatisfaction ────────────────────────────
+async function renderDissatisfaction(c) {
+  const d = await api('/api/dissatisfaction');
+  const dColor = d.value > 0.5 ? 'var(--red)' : d.value > 0.2 ? 'var(--yellow)' : 'var(--green)';
+  c.innerHTML = `
+    <div class="card" style="text-align:center">
+      <div style="font-size:64px;font-family:var(--mono);font-weight:700;color:${dColor}">${d.value.toFixed(4)}</div>
+      <div style="font-size:16px;color:var(--fg-2);margin-top:8px">${d.state}</div>
+      <div class="dissatisfaction-bar" style="max-width:400px;margin:16px auto">
+        <div class="dissatisfaction-fill" style="width:${d.value*100}%;background:${dColor}"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Per-Belief Contribution</span></div>
+      ${d.breakdown.map(b => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+          ${tensionBar(b.tension, '100px')}
+          <span class="mono" style="min-width:40px">${Number(b.tension).toFixed(2)}</span>
+          <span style="flex:1">${b.content}</span>
+          <span class="belief-domain">${b.domain}</span>
+          <span class="mono" style="color:var(--fg-3);min-width:50px">${b.connections} edges</span>
+          <span class="mono" style="color:var(--accent)">${Number(b.contribution).toFixed(3)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ── Chat ───────────────────────────────────────
+let chatMessages = [];
+async function renderChat(c) {
+  c.innerHTML = `
+    <div class="chat-container">
+      <div class="chat-messages" id="chat-msgs"></div>
+      <div class="chat-input-container">
+        <input class="chat-input" id="chat-input" placeholder="Talk to the anxious system..." autofocus>
+      </div>
+    </div>
+  `;
+  const input = document.getElementById('chat-input');
+  input.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const msg = input.value.trim();
+      if (!msg) return;
+      input.value = '';
+      appendMessage('user', msg);
+      appendThinking();
+      try {
+        const r = await apiPost('/api/chat', { message: msg, session_id: 'dashboard' });
+        removeThinking();
+        appendMessage('ai', r.response, r);
+      } catch(err) {
+        removeThinking();
+        appendMessage('system', 'Error: ' + err.message);
+      }
+    }
+  });
+}
+
+function appendMessage(role, text, meta) {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  const div = document.createElement('div');
+  div.className = 'chat-msg' + (role === 'user' ? ' chat-msg-user' : '');
+  const cls = role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai';
+  div.innerHTML = `<div class="chat-bubble ${cls}">${escapeHtml(text)}</div>`;
+  msgs.appendChild(div);
+  if (meta && role === 'ai') {
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'chat-meta';
+    metaDiv.textContent = `d=${meta.dissatisfaction?.toFixed(3) || '?'} evidence=${meta.evidence_extracted || 0}`;
+    msgs.appendChild(metaDiv);
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function appendThinking() {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  const div = document.createElement('div');
+  div.className = 'chat-msg';
+  div.id = 'thinking-indicator';
+  div.innerHTML = `<div class="chat-bubble chat-bubble-ai"><div class="spinner"></div> thinking...</div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+function removeThinking() {
+  document.getElementById('thinking-indicator')?.remove();
+}
+
+function appendRevisionToChat(rev) {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  const div = document.createElement('div');
+  div.innerHTML = `<div class="revision-card" style="margin:8px 24px">
+    <div style="font-size:12px;color:var(--red);font-weight:600">⚡ BELIEF REVISION</div>
+    <div class="old" style="margin-top:4px">${escapeHtml(rev.old_belief || '')}</div>
+    <div class="new" style="margin-top:4px">→ ${escapeHtml(rev.new_belief || '')}</div>
+  </div>`;
+  msgs.appendChild(div);
+}
+
+// ── Sessions ───────────────────────────────────
+async function renderSessions(c) {
+  const sessions = await api('/api/sessions');
+  if (!sessions.length) {
+    c.innerHTML = '<div class="card"><div style="color:var(--fg-3)">No sessions yet. Start chatting.</div></div>';
+    return;
+  }
+  c.innerHTML = `
+    <table class="beliefs-table">
+      <tr><th>Session</th><th>Messages</th><th>Revisions</th><th>Avg Dissatisfaction</th><th>Last Active</th></tr>
+      ${sessions.map(s => `
+        <tr>
+          <td class="mono">${s.session_id}</td>
+          <td class="mono">${s.messages}</td>
+          <td class="mono">${s.revisions_triggered}</td>
+          <td><div style="display:flex;gap:8px;align-items:center">${tensionBar(Number(s.avg_dissatisfaction || 0), '60px')} <span class="mono">${Number(s.avg_dissatisfaction || 0).toFixed(3)}</span></div></td>
+          <td class="mono" style="font-size:11px">${new Date(s.last_msg).toLocaleString()}</td>
+        </tr>
+      `).join('')}
+    </table>
+  `;
+}
+
+// ── Revisions ──────────────────────────────────
+async function renderRevisions(c) {
+  const revs = await api('/api/revisions?limit=50');
+  if (!revs.length) {
+    c.innerHTML = '<div class="card"><div style="color:var(--fg-3)">No revisions yet.</div></div>';
+    return;
+  }
+  c.innerHTML = revs.map(r => `
+    <div class="revision-card">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:12px;color:var(--red);font-weight:600">⚡ Phase Transition</span>
+        <span class="mono" style="font-size:11px;color:var(--fg-3)">${new Date(r.created_at).toLocaleString()}</span>
+      </div>
+      <div class="old">${r.old_content}</div>
+      <div class="new" style="margin-top:6px">→ ${r.new_content}</div>
+      <div style="font-size:12px;color:var(--fg-3);margin-top:8px">
+        trigger tension: <span class="mono">${Number(r.trigger_tension).toFixed(2)}</span>
+      </div>
+      ${r.reasoning ? `<div style="font-size:12px;color:var(--fg-2);margin-top:6px;padding:8px;background:var(--bg-3);border-radius:var(--radius-sm)">${escapeHtml(r.reasoning).slice(0,300)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+// ── Timeline ───────────────────────────────────
+async function renderTimeline(c) {
+  const rows = await api('/api/timeline');
+  if (!rows.length) {
+    c.innerHTML = '<div class="card"><div style="color:var(--fg-3)">No interactions yet.</div></div>';
+    return;
+  }
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Interaction Timeline</span><span class="card-subtitle">${rows.length} interactions</span></div>
+      ${rows.map(r => {
+        const d = Number(r.dissatisfaction_at_time || 0);
+        const color = d > 0.5 ? 'var(--red)' : d > 0.2 ? 'var(--yellow)' : 'var(--green)';
+        return `<div class="timeline-row">
+          <div class="timeline-dot" style="background:${color}"></div>
+          <span class="timeline-time">${new Date(r.created_at).toLocaleString()}</span>
+          ${tensionBar(d, '100px')}
+          <span class="mono" style="min-width:40px">${d.toFixed(3)}</span>
+          <span class="mono" style="font-size:11px;color:var(--fg-3)">${r.session_id}</span>
+          ${r.revision_triggered ? '<span class="badge badge-red">⚡ revision</span>' : ''}
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+// ── Config ─────────────────────────────────────
+async function renderConfig(c) {
+  const cfg = await api('/api/config');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">System Configuration</span></div>
+      ${Object.entries(cfg).map(([k,v]) => `
+        <div class="config-item">
+          <span class="config-key">${k}</span>
+          <span class="config-val">${v}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ── Utils ──────────────────────────────────────
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Boot ───────────────────────────────────────
+connectWS();
+loadTab('overview');
+</script>
+</body>
+</html>
