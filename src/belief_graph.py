@@ -62,7 +62,7 @@ async def reinforce_belief(belief_id: UUID) -> Belief:
         """,
         belief_id, CONFIDENCE_INCREMENT,
     )
-    return Belief(**dict(row))
+    return Belief(**dict(row)) if row else None
 
 
 async def add_tension(belief_id: UUID, delta: float) -> Belief:
@@ -77,7 +77,7 @@ async def add_tension(belief_id: UUID, delta: float) -> Belief:
         """,
         belief_id, delta,
     )
-    return Belief(**dict(row))
+    return Belief(**dict(row)) if row else None
 
 
 async def supersede_belief(old_id: UUID, new_id: UUID):
@@ -97,15 +97,20 @@ async def supersede_belief(old_id: UUID, new_id: UUID):
 # --- Connections ---
 
 async def connect_beliefs(
-    a: UUID, b: UUID, relation: str = "supports", strength: float = 0.5
+    a: UUID, b: UUID, relation: str = "supports", strength: float = 0.5,
+    method: str = "seed", reasoning: str | None = None,
 ):
     await db.execute(
         """
-        INSERT INTO belief_connections (belief_a, belief_b, strength, relation)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (belief_a, belief_b) DO UPDATE SET strength = $3, relation = $4
+        INSERT INTO belief_connections (belief_a, belief_b, strength, relation, discovery_method, discovery_reasoning)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (belief_a, belief_b) DO UPDATE SET 
+            strength = GREATEST(belief_connections.strength, $3),
+            relation = CASE WHEN $3 > belief_connections.strength THEN $4 ELSE belief_connections.relation END,
+            discovery_method = CASE WHEN belief_connections.discovery_method = 'seed' AND $5 != 'seed' THEN $5 ELSE belief_connections.discovery_method END,
+            discovery_reasoning = COALESCE($6, belief_connections.discovery_reasoning)
         """,
-        a, b, strength, relation,
+        a, b, strength, relation, method, reasoning,
     )
 
 

@@ -1,8 +1,12 @@
-"""Evidence Extractor — analyzes interactions to find reinforcing/contradicting evidence."""
+"""Evidence Extractor — analyzes interactions to find reinforcing/contradicting evidence.
+
+Also detects novel evidence that suggests new beliefs the system hasn't formed yet.
+"""
 
 import json
 from uuid import UUID
 from src.models import Evidence, Belief
+from src.belief_graph import create_belief, connect_beliefs, get_active_beliefs
 from src.claude import call_claude_json
 from src.prompts import evidence_extraction_prompt
 
@@ -22,7 +26,12 @@ async def extract_evidence(
     assistant_response: str,
     active_beliefs: list[Belief],
 ) -> list[Evidence]:
-    """Extract evidence from an interaction and match it against beliefs."""
+    """Extract evidence from an interaction and match it against beliefs.
+    
+    Novel evidence (not matching any belief) is tracked — if the same novel
+    claim appears multiple times across interactions, it may warrant creating
+    a new belief node.
+    """
     if not active_beliefs:
         return []
 
@@ -30,7 +39,10 @@ async def extract_evidence(
     prompt = evidence_extraction_prompt(user_message, assistant_response, beliefs_summary)
 
     try:
-        raw = await call_claude_json("You are a precise evidence extraction system. Respond only in valid JSON.", prompt)
+        raw = await call_claude_json(
+            "You are a precise evidence extraction system. Respond only in valid JSON.",
+            prompt,
+        )
     except (json.JSONDecodeError, Exception):
         return []
 
@@ -44,7 +56,11 @@ async def extract_evidence(
 
         belief_index = item.get("belief_index")
         belief_id = None
-        if isinstance(belief_index, int) and 0 <= belief_index < len(active_beliefs):
+
+        # "novel" means the evidence doesn't match any existing belief
+        if belief_index == "novel" or belief_index is None:
+            belief_id = None
+        elif isinstance(belief_index, int) and 0 <= belief_index < len(active_beliefs):
             belief_id = active_beliefs[belief_index].id
 
         stance = item.get("stance", "neutral")

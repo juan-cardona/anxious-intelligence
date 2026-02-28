@@ -34,7 +34,7 @@ async def accumulate(
             )
 
             # Check if this pushed the belief over the threshold
-            if updated.tension >= REVISION_THRESHOLD:
+            if updated and updated.tension >= REVISION_THRESHOLD:
                 triggered.append(updated)
 
     return triggered

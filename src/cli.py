@@ -107,6 +107,7 @@ async def show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  [cyan]\\beliefs[/cyan]        — Show all active beliefs with tension levels\n"
+        "  [cyan]\\graph[/cyan]          — Show belief graph with all connections\n"
         "  [cyan]\\dissatisfaction[/cyan] — Show global dissatisfaction breakdown\n"
         "  [cyan]\\revisions[/cyan]      — Show revision history\n"
         "  [cyan]\\seed[/cyan]           — Re-seed initial beliefs\n"
@@ -118,14 +119,76 @@ async def show_help():
     ))
 
 
+async def show_graph():
+    """Show the full belief graph with all connections."""
+    from src.belief_graph import get_active_beliefs
+    from src import db as _db
+
+    beliefs = await get_active_beliefs()
+    if not beliefs:
+        console.print("[dim]No beliefs.[/dim]")
+        return
+
+    # Fetch all connections
+    rows = await _db.fetch(
+        """
+        SELECT c.*, a.content as a_content, b.content as b_content
+        FROM belief_connections c
+        JOIN beliefs a ON c.belief_a = a.id
+        JOIN beliefs b ON c.belief_b = b.id
+        WHERE a.is_active = true AND b.is_active = true
+        ORDER BY c.strength DESC
+        """
+    )
+
+    console.print(f"\n[bold]Belief Graph[/bold] — {len(beliefs)} nodes, {len(rows)} edges\n")
+
+    if rows:
+        table = Table(show_lines=True)
+        table.add_column("From", max_width=35)
+        table.add_column("→", width=15)
+        table.add_column("To", max_width=35)
+        table.add_column("Str", width=5)
+        for r in rows:
+            rel_color = {
+                "supports": "green",
+                "contradicts": "red",
+                "depends_on": "cyan",
+                "generalizes": "yellow",
+                "tension_shares": "magenta",
+            }.get(r["relation"], "white")
+            table.add_row(
+                r["a_content"][:35],
+                f"[{rel_color}]{r['relation']}[/{rel_color}]",
+                r["b_content"][:35],
+                f"{r['strength']:.1f}",
+            )
+        console.print(table)
+    else:
+        console.print("[dim]No connections yet. Connections emerge during revisions.[/dim]")
+
+
 async def handle_revision(revision: dict):
     if revision.get("status") == "revised":
         console.print()
+
+        # Connection discovery info
+        stored = revision.get("stored_connections", 0)
+        discovered = revision.get("discovered_connections", 0)
+        disc_details = revision.get("discovered_details", [])
+
+        conn_text = f"[cyan]Connections:[/cyan] {stored} stored, [bold yellow]{discovered} discovered[/bold yellow]"
+        if disc_details:
+            conn_text += "\n"
+            for d in disc_details:
+                conn_text += f"  [yellow]↗[/yellow] {d['content']} [{d['relation']}] — {d['reasoning']}\n"
+
         console.print(Panel(
             f"[bold red]⚡ BELIEF REVISION TRIGGERED[/bold red]\n\n"
             f"[red]Old:[/red] {revision.get('old_belief', '?')}\n"
             f"[green]New:[/green] {revision.get('new_belief', '?')}\n\n"
-            f"[dim]Analysis: {revision.get('analysis', '')[:300]}[/dim]\n\n"
+            f"[dim]Analysis: {revision.get('analysis', '')[:400]}[/dim]\n\n"
+            f"{conn_text}\n"
             f"[yellow]Behavioral changes:[/yellow]\n" +
             "\n".join(f"  • {c}" for c in revision.get("behavioral_changes", [])),
             title="🔄 Phase Transition",
@@ -174,6 +237,8 @@ async def run_cli():
                 await show_beliefs()
             elif cmd in ("\\dissatisfaction", "\\d"):
                 await show_dissatisfaction()
+            elif cmd in ("\\graph", "\\g"):
+                await show_graph()
             elif cmd in ("\\revisions", "\\rev"):
                 await show_revisions()
             elif cmd == "\\seed":

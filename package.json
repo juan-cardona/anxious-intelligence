@@ -1,0 +1,30 @@
+{
+  "name": "anxious-intelligence",
+  "version": "0.1.0",
+  "description": "A system architecture for persistent dissonance-driven AI",
+  "type": "module",
+  "bin": {
+    "anx": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "chat": "tsx src/index.ts chat",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.0",
+    "ora": "^8.2.0",
+    "pg": "^8.13.0",
+    "undici": "^7.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
