@@ -1,0 +1,27 @@
+{
+  "name": "anxious-intelligence",
+  "version": "0.1.0",
+  "description": "Persistent dissonance-driven AI — beliefs accumulate tension, triggering phase-transition revisions",
+  "type": "module",
+  "bin": {
+    "anxious": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "seed": "tsx src/commands/seed.ts",
+    "migrate": "tsx src/commands/migrate.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@types/pg": "^8.16.0",
+    "chalk": "^5.6.2",
+    "dotenv": "^17.3.1",
+    "pg": "^8.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
