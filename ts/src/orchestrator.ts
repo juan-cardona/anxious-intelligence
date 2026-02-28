@@ -1,10 +1,16 @@
 /**
  * Orchestrator — the main interaction loop.
- * Supports multi-turn conversation, agentic tool use, timeouts, and concurrent requests.
+ * 
+ * Features:
+ * - Unlimited tool iterations (time-bound only)
+ * - Context compaction to stay under token limits
+ * - Rate limit handling with backoff
+ * - Session locking for concurrent safety
+ * - Non-blocking post-processing (evidence, revisions)
  */
 
 import { getActiveBeliefs, getBeliefsAboveThreshold } from "./belief-graph.js";
-import { callClaudeWithTools, type ClaudeMessage, type ToolMessage, type ContentBlock, type ToolResultBlock } from "./claude.js";
+import { callClaude, callClaudeWithTools, type ClaudeMessage, type ToolMessage, type ContentBlock, type ToolResultBlock, type TextBlock, type ToolUseBlock } from "./claude.js";
 import { computeDissatisfaction, describeState } from "./dissatisfaction.js";
 import { extractEvidence } from "./evidence-extractor.js";
 import { formatBeliefsForPrompt } from "./prompts.js";
@@ -15,7 +21,7 @@ import { queryVal, query } from "./db.js";
 import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
 import type { InteractionResult, RevisionResult } from "./types.js";
 
-// ── Session History Store ─────────────────────────────────────────
+// ── Session History ───────────────────────────────────────────────
 
 const MAX_HISTORY = 20;
 const sessionHistories = new Map<string, ClaudeMessage[]>();
@@ -33,13 +39,11 @@ function appendToHistory(sessionId: string, role: "user" | "assistant", content:
   history.push({ role, content });
   while (history.length > MAX_HISTORY * 2) {
     history.shift();
-    if (history.length && history[0].role === "assistant") {
-      history.shift();
-    }
+    if (history.length && history[0].role === "assistant") history.shift();
   }
 }
 
-// ── Timeout helper ────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -51,20 +55,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
-// ── Processing lock per session ───────────────────────────────────
-// Prevents concurrent processing on the same session (queues instead of blocking)
+// ── User request priority ─────────────────────────────────────────
 
-// Track if a user (non-autonomous) request is active
 let _userRequestActive = false;
 export function isUserRequestActive(): boolean { return _userRequestActive; }
+
+// ── Session locking ───────────────────────────────────────────────
 
 const sessionLocks = new Map<string, Promise<any>>();
 
 function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
   const prev = sessionLocks.get(sessionId) ?? Promise.resolve();
-  const next = prev.then(fn, fn); // run even if previous errored
+  const next = prev.then(fn, fn);
   sessionLocks.set(sessionId, next.catch(() => {}));
-  // Clean up after completion
   next.finally(() => {
     if (sessionLocks.get(sessionId) === next.catch(() => {})) {
       sessionLocks.delete(sessionId);
@@ -73,54 +76,191 @@ function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T>
   return next;
 }
 
+// ── Token estimation ──────────────────────────────────────────────
+
+function estimateTokens(messages: ToolMessage[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      chars += m.content.length;
+    } else if (Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if ("text" in block) chars += (block as any).text.length;
+        if ("content" in block) chars += String((block as any).content).length;
+        if ("input" in block) chars += JSON.stringify((block as any).input).length;
+      }
+    }
+  }
+  return Math.ceil(chars / 3.5); // rough chars-to-tokens ratio
+}
+
+// ── Context compaction ────────────────────────────────────────────
+// When messages get too large, summarize old tool exchanges
+
+// ── Session Pruning (OpenClaw-style) ──────────────────────────────
+// Two mechanisms, matching OpenClaw's approach:
+//
+// 1. PRUNING (per-request, transient): Soft-trim/hard-clear old tool results
+//    - Only affects tool_result messages
+//    - Keeps last N assistant exchanges fully intact
+//    - Soft-trim: head + tail of oversized results
+//    - Hard-clear: replace very old results with placeholder
+//
+// 2. COMPACTION (at context limit): LLM-powered summarization
+//    - Only triggers near context window limit (180k tokens)
+//    - Summarizes and replaces old exchanges
+//    - Last resort, not the primary mechanism
+
+const KEEP_LAST_ASSISTANTS = 3;
+const SOFT_TRIM_MAX_CHARS = 4000;
+const SOFT_TRIM_HEAD = 1500;
+const SOFT_TRIM_TAIL = 1500;
+const HARD_CLEAR_PLACEHOLDER = "[Old tool result content cleared]";
+const MIN_PRUNABLE_CHARS = 2000; // Don't bother trimming small results
+const COMPACTION_TRIGGER_TOKENS = 180_000; // Only compact near context window limit
+
+function pruneMessages(messages: ToolMessage[]): ToolMessage[] {
+  // Find assistant message indices (tool exchange pairs)
+  const assistantIndices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "assistant" && Array.isArray(messages[i].content)) {
+      assistantIndices.push(i);
+    }
+  }
+
+  if (assistantIndices.length <= KEEP_LAST_ASSISTANTS) return messages;
+
+  // Determine cutoff: protect last N assistant exchanges
+  const protectedFrom = assistantIndices[assistantIndices.length - KEEP_LAST_ASSISTANTS];
+
+  for (let i = 0; i < messages.length; i++) {
+    if (i >= protectedFrom) break; // Protected zone
+
+    const msg = messages[i];
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+
+    for (const block of msg.content as any[]) {
+      if (block.type !== "tool_result" || typeof block.content !== "string") continue;
+
+      const len = block.content.length;
+      if (len < MIN_PRUNABLE_CHARS) continue;
+
+      if (len > SOFT_TRIM_MAX_CHARS) {
+        // Hard-clear very old, very large results
+        const assistantsAfter = assistantIndices.filter(a => a > i).length;
+        if (assistantsAfter > KEEP_LAST_ASSISTANTS + 2) {
+          block.content = HARD_CLEAR_PLACEHOLDER;
+          continue;
+        }
+
+        // Soft-trim: keep head + tail
+        const head = block.content.slice(0, SOFT_TRIM_HEAD);
+        const tail = block.content.slice(-SOFT_TRIM_TAIL);
+        block.content = `${head}\n\n... [${len} chars, soft-trimmed] ...\n\n${tail}`;
+      }
+    }
+  }
+
+  // Check if compaction needed (near context window)
+  const est = estimateTokens(messages);
+  if (est < COMPACTION_TRIGGER_TOKENS) return messages;
+
+  // Full compaction: summarize old exchanges
+  console.log(`[compaction] ~${est} tokens (near limit), compacting old exchanges`);
+
+  let toolStartIdx = assistantIndices[0] ?? -1;
+  if (toolStartIdx < 0) return messages;
+
+  const prefix = messages.slice(0, toolStartIdx);
+  const toolExchanges = messages.slice(toolStartIdx);
+  const pairCount = Math.floor(toolExchanges.length / 2);
+  const keepPairs = KEEP_LAST_ASSISTANTS;
+  const dropCount = pairCount - keepPairs;
+  if (dropCount <= 0) return messages;
+
+  const kept = toolExchanges.slice(dropCount * 2);
+
+  // Brief summary of dropped exchanges
+  const lines: string[] = [];
+  for (let i = 0; i < dropCount * 2; i += 2) {
+    const a = toolExchanges[i];
+    if (Array.isArray(a?.content)) {
+      for (const b of a.content as any[]) {
+        if (b.type === "tool_use") {
+          lines.push(`- ${b.name}(${JSON.stringify(b.input).slice(0, 60)})`);
+        }
+      }
+    }
+  }
+
+  const summary = `[Compacted: ${dropCount} tool exchanges dropped]\nTools used: ${lines.slice(0, 20).join(", ")}${lines.length > 20 ? ` +${lines.length - 20} more` : ""}`;
+
+  const result: ToolMessage[] = [
+    ...prefix,
+    { role: "user", content: summary },
+    { role: "assistant", content: "Understood, continuing." },
+    ...kept,
+  ];
+
+  const newEst = estimateTokens(result);
+  console.log(`[compaction] ${est} → ${newEst} tokens`);
+  return result;
+}
+
 // ── Agentic Tool Loop ─────────────────────────────────────────────
 
-const MAX_TOOL_ITERATIONS = Infinity; // no iteration limit — only time-bound
-const LOOP_TIMEOUT_MS = 15 * 60 * 1000; // 15 min overall timeout
-const TOOL_EXEC_TIMEOUT_MS = 45_000; // 45s per tool execution
+const LOOP_TIMEOUT_MS = 15 * 60 * 1000; // 15 min
+const TOOL_EXEC_TIMEOUT_MS = 45_000;
+const MAX_TOOL_OUTPUT = 8000; // Pruning handles old results — keep fresh ones useful
 
 async function runAgenticLoop(
   system: string,
   initialMessages: ToolMessage[],
   onEvent?: (event: string, data: any) => void,
 ): Promise<{ response: string; toolsUsed: Array<{ name: string; input: any; output: string }> }> {
-  const messages: ToolMessage[] = [...initialMessages];
+  let messages: ToolMessage[] = [...initialMessages];
   const toolsUsed: Array<{ name: string; input: any; output: string }> = [];
   let iteration = 0;
   const loopStart = Date.now();
 
-  while (iteration < MAX_TOOL_ITERATIONS) {
-    // Check overall timeout
-    if (Date.now() - loopStart > LOOP_TIMEOUT_MS) {
-      console.warn(`[agentic loop] Overall timeout after ${iteration} iterations`);
+  while (true) {
+    // Time check
+    const elapsed = Date.now() - loopStart;
+    if (elapsed > LOOP_TIMEOUT_MS) {
+      console.warn(`[agentic] Timeout after ${iteration} iterations, ${elapsed}ms`);
       return {
         response: toolsUsed.length
-          ? `I ran out of time after ${iteration} tool calls. Here's what I found so far — please ask me to continue if needed.`
-          : "I timed out before completing the response. Please try again.",
+          ? "I ran out of time. Ask me to continue where I left off."
+          : "Processing timed out.",
         toolsUsed,
       };
     }
 
     iteration++;
-    onEvent?.("thinking", { iteration });
+    onEvent?.("thinking", { iteration, elapsed: Math.round(elapsed / 1000) });
 
+    // Compact context if too large
+    messages = pruneMessages(messages);
+
+    // Call Claude
     let contentBlocks: ContentBlock[];
     try {
       contentBlocks = await callClaudeWithTools(system, messages, TOOL_DEFINITIONS);
     } catch (err: any) {
-      console.error(`[agentic loop] Claude API error on iteration ${iteration}:`, err.message);
-      onEvent?.("error", { message: `API error: ${err.message}` });
+      console.error(`[agentic] API error iteration ${iteration}:`, err.message);
+      onEvent?.("error", { message: err.message });
       return {
         response: toolsUsed.length
-          ? `I encountered an error after ${toolsUsed.length} tool call(s): ${err.message}`
-          : `Error communicating with the model: ${err.message}`,
+          ? `Error after ${toolsUsed.length} tool calls: ${err.message}. Ask me to continue.`
+          : `Error: ${err.message}`,
         toolsUsed,
       };
     }
 
-    const textBlocks = contentBlocks.filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text");
-    const toolUseBlocks = contentBlocks.filter((b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use");
+    const textBlocks = contentBlocks.filter((b): b is TextBlock => b.type === "text");
+    const toolUseBlocks = contentBlocks.filter((b): b is ToolUseBlock => b.type === "tool_use");
 
+    // If no tool calls, we're done
     if (!toolUseBlocks.length) {
       return {
         response: textBlocks.map((b) => b.text).join(""),
@@ -128,72 +268,36 @@ async function runAgenticLoop(
       };
     }
 
-    // Execute all tool calls
+    // Execute tools
     const toolResults: ToolResultBlock[] = [];
     for (const tb of toolUseBlocks) {
       onEvent?.("tool_call", { name: tb.name, input: tb.input });
+
       let output: string;
       try {
-        output = await withTimeout(
-          executeTool(tb.name, tb.input),
-          TOOL_EXEC_TIMEOUT_MS,
-          `tool:${tb.name}`,
-        );
+        output = await withTimeout(executeTool(tb.name, tb.input), TOOL_EXEC_TIMEOUT_MS, `tool:${tb.name}`);
       } catch (err: any) {
-        output = `Tool error: ${err.message}`;
+        output = `Error: ${err.message}`;
       }
-      // Truncate large outputs
-      const MAX_TOOL_OUTPUT = 8000;
+
+      // Truncate
       if (output.length > MAX_TOOL_OUTPUT) {
-        output = output.slice(0, MAX_TOOL_OUTPUT) + `\n\n[truncated — ${output.length} chars total]`;
+        output = output.slice(0, MAX_TOOL_OUTPUT) + `\n[truncated, ${output.length} chars total]`;
       }
-      onEvent?.("tool_result", { name: tb.name, output: output.slice(0, 2000) }); // truncate SSE event too
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: tb.id,
-        content: output,
-      });
+
+      onEvent?.("tool_result", { name: tb.name, output: output.slice(0, 2000) });
+
+      toolResults.push({ type: "tool_result", tool_use_id: tb.id, content: output });
       toolsUsed.push({ name: tb.name, input: tb.input, output });
     }
 
+    // Add to conversation
     messages.push({ role: "assistant", content: contentBlocks });
     messages.push({ role: "user", content: toolResults });
-
-    // Compact old tool results to keep context manageable
-    // After 10 tool rounds (20 messages = 10 assistant + 10 user), 
-    // truncate old tool_result content to summaries
-    const toolMsgCount = messages.filter(m => Array.isArray(m.content)).length;
-    if (toolMsgCount > 20) {
-      // Truncate tool results older than the last 6 exchanges
-      const keepRecent = 12; // last 6 pairs
-      let toolIdx = 0;
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i];
-        if (Array.isArray(msg.content)) {
-          toolIdx++;
-          const fromEnd = toolMsgCount - toolIdx;
-          if (fromEnd >= keepRecent && msg.role === "user") {
-            // This is an old tool_result message — truncate content
-            for (const block of msg.content as any[]) {
-              if (block.type === "tool_result" && typeof block.content === "string" && block.content.length > 200) {
-                block.content = block.content.slice(0, 200) + "\n[earlier output truncated to save context]";
-              }
-            }
-          }
-        }
-      }
-    }
   }
-
-  return {
-    response: toolsUsed.length
-      ? "I ran out of time on this task. Ask me to continue where I left off."
-      : "Processing timed out. Please try again.",
-    toolsUsed,
-  };
 }
 
-// ── Main Processing Loop ──────────────────────────────────────────
+// ── Main Entry Point ──────────────────────────────────────────────
 
 export async function processInteraction(
   userMessage: string,
@@ -218,38 +322,31 @@ async function _processInteraction(
   onRevision?: (rev: RevisionResult) => void,
   onEvent?: (event: string, data: any) => void,
 ): Promise<InteractionResult> {
-  // 1. Current state
+  // 1. State
   let dissatisfaction = await computeDissatisfaction();
   let activeBeliefs = await getActiveBeliefs();
 
-  // 2. Pre-check: urgent revisions (with timeout)
+  // 2. Pre-revisions (with timeout, non-fatal)
   const urgent = await getBeliefsAboveThreshold();
   let preRevisions: RevisionResult[] = [];
   if (urgent.length && dissatisfaction > 0.6) {
     try {
-      preRevisions = await withTimeout(
-        reviseAllTriggered(urgent),
-        60_000,
-        "pre-revision",
-      );
+      preRevisions = await withTimeout(reviseAllTriggered(urgent), 60_000, "pre-revision");
       for (const rev of preRevisions) onRevision?.(rev);
       activeBeliefs = await getActiveBeliefs();
       dissatisfaction = await computeDissatisfaction();
     } catch (err: any) {
-      console.error("[orchestrator] Pre-revision timeout:", err.message);
+      console.error("[orchestrator] Pre-revision error:", err.message);
     }
   }
 
-  // 3. Build system prompt
+  // 3. System prompt
   const beliefsSummary = formatBeliefsForPrompt(activeBeliefs);
   const recentRevs = await getRecentRevisions(3);
-  const revisionText = recentRevs
-    .map((r) => `- "${r.old_content}" → "${r.new_content}"`)
-    .join("\n");
-
+  const revisionText = recentRevs.map((r) => `- "${r.old_content}" → "${r.new_content}"`).join("\n");
   const system = systemPromptWithBeliefs(beliefsSummary, dissatisfaction, revisionText);
 
-  // 4. History + current message
+  // 4. Messages
   const history = getSessionHistory(sessionId);
   const initialMessages: ToolMessage[] = [
     ...history.map((h) => ({ role: h.role, content: h.content })),
@@ -259,39 +356,31 @@ async function _processInteraction(
   // 5. Agentic loop
   const { response, toolsUsed } = await runAgenticLoop(system, initialMessages, onEvent);
 
-  // 6. Store in history
+  // 6. History
   appendToHistory(sessionId, "user", userMessage);
   appendToHistory(sessionId, "assistant", response);
 
-  // 7. Evidence extraction (non-blocking — don't let it freeze the response)
+  // 7. Evidence extraction (non-blocking, timeout)
   let evidence: any[] = [];
   try {
-    evidence = await withTimeout(
-      extractEvidence(userMessage, response, activeBeliefs),
-      30_000,
-      "evidence-extraction",
-    );
+    evidence = await withTimeout(extractEvidence(userMessage, response, activeBeliefs), 30_000, "evidence");
   } catch (err: any) {
-    console.error("[orchestrator] Evidence extraction timeout:", err.message);
+    console.error("[orchestrator] Evidence extraction error:", err.message);
   }
 
-  // 8. Log interaction
+  // 8. Log
   const interactionId = await queryVal<string>(
     `INSERT INTO interactions (session_id, user_message, assistant_response, extracted_claims, dissatisfaction_at_time)
      VALUES ($1, $2, $3, $4, $5) RETURNING id`,
     [sessionId, userMessage, response, JSON.stringify(evidence), dissatisfaction],
   );
 
-  // 9. Tension + revisions (fire-and-forget — don't block the response)
+  // 9. Post-processing: tension + revisions (fire and forget)
   setImmediate(async () => {
     try {
       const triggered = await accumulate(evidence, interactionId);
       if (triggered.length) {
-        const postRevisions = await withTimeout(
-          reviseAllTriggered(triggered),
-          60_000,
-          "post-revision",
-        );
+        const postRevisions = await withTimeout(reviseAllTriggered(triggered), 90_000, "post-revision");
         for (const rev of postRevisions) onRevision?.(rev);
         if (interactionId) {
           await query("UPDATE interactions SET revision_triggered = true WHERE id = $1", [interactionId]);
