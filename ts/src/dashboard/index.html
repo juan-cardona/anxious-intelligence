@@ -412,7 +412,7 @@ async function renderBeliefs(c) {
       <tr><th>Status</th><th>Tension</th><th>Conf.</th><th>Belief</th><th>Domain</th><th>Edges</th></tr>
       ${beliefs.map(b => {
         const icon = b.tension > 0.5 ? '🔴' : b.tension > 0.2 ? '🟡' : '🟢';
-        return `<tr>
+        return `<tr style="cursor:pointer" onclick="showBeliefDetail('${b.id}')">
           <td>${icon}</td>
           <td><div style="display:flex;align-items:center;gap:8px">${tensionBar(b.tension,'80px')} <span class="mono">${b.tension.toFixed(2)}</span></div></td>
           <td class="mono">${b.confidence.toFixed(2)}</td>
@@ -422,6 +422,66 @@ async function renderBeliefs(c) {
         </tr>`;
       }).join('')}
     </table>
+  `;
+}
+
+async function showBeliefDetail(id) {
+  const c = document.getElementById('content');
+  c.innerHTML = '<div class="loading-page"><div class="spinner"></div></div>';
+  const b = await api('/api/beliefs/' + id);
+  const dColor = b.tension > 0.5 ? 'var(--red)' : b.tension > 0.2 ? 'var(--yellow)' : 'var(--green)';
+  c.innerHTML = `
+    <div style="margin-bottom:16px">
+      <button onclick="loadTab('beliefs')" style="background:var(--bg-3);border:1px solid var(--border);color:var(--fg-2);padding:6px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:12px">← Back to Beliefs</button>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">${b.content}</span>
+        <span class="belief-domain">${b.domain}</span>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">Tension</div>
+          <div class="stat-value" style="color:${dColor}">${b.tension.toFixed(4)}</div>
+          ${tensionBar(b.tension, '100%')}
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Confidence</div>
+          <div class="stat-value" style="color:var(--cyan)">${b.confidence.toFixed(4)}</div>
+          ${tensionBar(b.confidence, '100%')}
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Importance</div>
+          <div class="stat-value">${b.importance.toFixed(2)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Reinforcements</div>
+          <div class="stat-value">${b.reinforcement_count}</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Connected Beliefs (${b.connections.length})</span></div>
+      ${b.connections.length ? b.connections.map(cb => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="showBeliefDetail('${cb.id}')">
+          <span>${cb.tension > 0.5 ? '🔴' : cb.tension > 0.2 ? '🟡' : '🟢'}</span>
+          ${tensionBar(cb.tension, '60px')}
+          <span style="flex:1;font-size:13px">${cb.content}</span>
+          <span class="mono" style="color:var(--fg-3)">c=${cb.confidence.toFixed(2)}</span>
+        </div>
+      `).join('') : '<div style="color:var(--fg-3)">No connections yet.</div>'}
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Contradiction History (${b.contradictions.length})</span></div>
+      ${b.contradictions.length ? b.contradictions.map(ct => `
+        <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:13px">${escapeHtml(ct.evidence)}</div>
+          <div style="font-size:11px;color:var(--fg-3);margin-top:2px">
+            Δt=${Number(ct.tension_delta).toFixed(3)} • ${new Date(ct.created_at).toLocaleString()}
+          </div>
+        </div>
+      `).join('') : '<div style="color:var(--fg-3)">No contradictions logged.</div>'}
+    </div>
   `;
 }
 
@@ -645,7 +705,7 @@ async function renderSessions(c) {
     <table class="beliefs-table">
       <tr><th>Session</th><th>Messages</th><th>Revisions</th><th>Avg Dissatisfaction</th><th>Last Active</th></tr>
       ${sessions.map(s => `
-        <tr>
+        <tr style="cursor:pointer" onclick="showSessionDetail('${s.session_id}')">
           <td class="mono">${s.session_id}</td>
           <td class="mono">${s.messages}</td>
           <td class="mono">${s.revisions_triggered}</td>
@@ -709,9 +769,13 @@ async function renderTimeline(c) {
 // ── Config ─────────────────────────────────────
 async function renderConfig(c) {
   const cfg = await api('/api/config');
+  const health = await api('/api/health');
   c.innerHTML = `
     <div class="card">
-      <div class="card-header"><span class="card-title">System Configuration</span></div>
+      <div class="card-header">
+        <span class="card-title">System Configuration</span>
+        <span class="card-subtitle">uptime: ${Math.round(health.uptime)}s</span>
+      </div>
       ${Object.entries(cfg).map(([k,v]) => `
         <div class="config-item">
           <span class="config-key">${k}</span>
@@ -719,6 +783,47 @@ async function renderConfig(c) {
         </div>
       `).join('')}
     </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Health</span></div>
+      <div class="config-item">
+        <span class="config-key">database</span>
+        <span class="config-val" style="color:${health.db ? 'var(--green)' : 'var(--red)'}">${health.db ? '● connected' : '○ disconnected'}</span>
+      </div>
+    </div>
+    <div class="card" style="border-color:rgba(239,68,68,0.3)">
+      <div class="card-header"><span class="card-title" style="color:var(--red)">Danger Zone</span></div>
+      <p style="font-size:13px;color:var(--fg-2);margin-bottom:12px">Reset all beliefs to seed state. Deletes all interactions, revisions, and contradiction history.</p>
+      <button onclick="resetSystem()" style="background:var(--red);color:white;border:none;padding:8px 16px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;font-weight:500">Reset & Reseed</button>
+    </div>
+  `;
+}
+
+async function resetSystem() {
+  if (!confirm('This will delete ALL data and reseed beliefs. Are you sure?')) return;
+  await apiPost('/api/reset', {});
+  loadTab('overview');
+}
+
+async function showSessionDetail(sessionId) {
+  const c = document.getElementById('content');
+  c.innerHTML = '<div class="loading-page"><div class="spinner"></div></div>';
+  const interactions = await api('/api/interactions?session=' + encodeURIComponent(sessionId) + '&limit=100');
+  c.innerHTML = `
+    <div style="margin-bottom:16px">
+      <button onclick="loadTab('sessions')" style="background:var(--bg-3);border:1px solid var(--border);color:var(--fg-2);padding:6px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:12px">← Back to Sessions</button>
+      <span style="margin-left:12px;font-family:var(--mono);font-size:14px">${escapeHtml(sessionId)}</span>
+    </div>
+    ${interactions.reverse().map(i => `
+      <div style="margin-bottom:16px">
+        <div class="chat-msg chat-msg-user"><div class="chat-bubble chat-bubble-user">${escapeHtml(i.user_message)}</div></div>
+        ${i.assistant_response ? `<div class="chat-msg"><div class="chat-bubble chat-bubble-ai">${escapeHtml(i.assistant_response).slice(0,500)}</div></div>` : ''}
+        <div class="chat-meta">
+          d=${Number(i.dissatisfaction_at_time || 0).toFixed(3)}
+          ${i.revision_triggered ? ' • ⚡ revision triggered' : ''}
+          • ${new Date(i.created_at).toLocaleString()}
+        </div>
+      </div>
+    `).join('')}
   `;
 }
 

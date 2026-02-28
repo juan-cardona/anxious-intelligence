@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-import { getPool, queryMany, queryOne, queryVal } from "./db.js";
+import { getPool, query, queryMany, queryOne, queryVal } from "./db.js";
 import {
   getActiveBeliefs,
   getBeliefsAboveThreshold,
@@ -300,6 +300,33 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         res.end(`<!DOCTYPE html><html><body>Dashboard not found at ${dashboardPath}</body></html>`);
         return;
       }
+    }
+
+    // ── Belief History (superseded chain) ──────────────────
+    if (path === "/api/belief-history" && method === "GET") {
+      const rows = await queryMany(
+        `SELECT b.*, s.content as supersedes_content
+         FROM beliefs b
+         LEFT JOIN beliefs s ON b.superseded_by = s.id
+         ORDER BY b.created_at DESC LIMIT 100`,
+      );
+      return json(res, rows);
+    }
+
+    // ── Reset (dangerous) ───────────────────────────────────
+    if (path === "/api/reset" && method === "POST") {
+      for (const table of ["revisions", "contradiction_log", "interactions", "belief_connections", "beliefs"]) {
+        await query(`DELETE FROM ${table}`);
+      }
+      await seedBeliefs();
+      broadcast("reset", { ts: Date.now() });
+      return json(res, { status: "reset", seeded: true });
+    }
+
+    // ── Health ──────────────────────────────────────────────
+    if (path === "/api/health" && method === "GET") {
+      const dbOk = await queryVal<number>("SELECT 1");
+      return json(res, { status: "ok", db: !!dbOk, uptime: process.uptime() });
     }
 
     json(res, { error: "not found" }, 404);
