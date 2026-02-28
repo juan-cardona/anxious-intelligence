@@ -77,21 +77,14 @@ export function startTelegram(token: string) {
         }
       });
 
-      // Build response with dissatisfaction footer
-      const dIcon = result.dissatisfaction > 0.5 ? "🔴" : result.dissatisfaction > 0.2 ? "🟡" : "🟢";
-      const footer = `\n\n<i>${dIcon} d=${result.dissatisfaction.toFixed(3)} · ${result.evidence_extracted} evidence</i>`;
-
-      // Send response (split if too long)
-      const fullResponse = result.response + footer;
-      if (fullResponse.length > 4000) {
-        // Split into chunks
+      // Send response (split if too long, no internal state footer)
+      if (result.response.length > 4000) {
         const chunks = splitMessage(result.response, 3900);
-        for (let i = 0; i < chunks.length; i++) {
-          const text = i === chunks.length - 1 ? chunks[i] + footer : chunks[i];
-          await ctx.reply(text, { parse_mode: "HTML" });
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
         }
       } else {
-        await ctx.reply(fullResponse, { parse_mode: "HTML" });
+        await ctx.reply(result.response);
       }
     } catch (err) {
       console.error("Telegram processing error:", err);
@@ -105,6 +98,8 @@ export function startTelegram(token: string) {
 
   bot.start({
     onStart: () => console.log("  📱 Telegram bot started"),
+  }).catch((err) => {
+    console.error("  ⚠ Telegram bot failed to start:", err.message);
   });
 
   return bot;

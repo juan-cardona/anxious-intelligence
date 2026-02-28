@@ -110,11 +110,7 @@ export function startDiscord(token: string) {
         await sendSplit(msg, revMsg);
       }
 
-      // Build response with dissatisfaction footer
-      const dIcon = result.dissatisfaction > 0.5 ? "🔴" : result.dissatisfaction > 0.2 ? "🟡" : "🟢";
-      const footer = `\n\n_${dIcon} d=${result.dissatisfaction.toFixed(3)} · ${result.evidence_extracted} evidence_`;
-
-      await sendSplit(msg, result.response + footer);
+      await sendSplit(msg, result.response);
     } catch (err) {
       console.error("Discord processing error:", err);
       await msg.reply("⚠️ Processing error. The belief system may be under revision.").catch(() => {});

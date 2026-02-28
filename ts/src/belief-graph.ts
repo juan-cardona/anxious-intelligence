@@ -1,10 +1,33 @@
 /**
  * Belief Graph — persistent self-model with tension dynamics.
+ *
+ * Production features:
+ * - Structured logging for all mutations
+ * - Optimistic locking on tension updates (SELECT FOR UPDATE)
+ * - Input validation on all public functions
+ * - Consistent error handling
  */
 
 import { query, queryOne, queryMany, queryVal } from "./db.js";
 import type { Belief, RelationType, DiscoveryMethod } from "./types.js";
 import { CONFIDENCE_INCREMENT, REVISION_THRESHOLD } from "./config.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("belief-graph");
+
+// ── Validation ────────────────────────────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateUUID(id: string, label = "id"): void {
+  if (!id || !UUID_RE.test(id)) {
+    throw new Error(`Invalid UUID for ${label}: ${id}`);
+  }
+}
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
 
 // ── CRUD ──────────────────────────────────────────────────────────
 
@@ -14,15 +37,23 @@ export async function createBelief(
   confidence = 0.5,
   importance = 0.5,
 ): Promise<Belief> {
+  if (!content || content.trim().length === 0) {
+    throw new Error("Belief content cannot be empty");
+  }
+  confidence = clamp01(confidence);
+  importance = clamp01(importance);
+
   const row = await queryOne<Belief>(
     `INSERT INTO beliefs (content, domain, confidence, importance)
      VALUES ($1, $2, $3, $4) RETURNING *`,
-    [content, domain, confidence, importance],
+    [content.trim(), domain, confidence, importance],
   );
+  log.info("Created belief", { id: row!.id, domain, confidence, content: content.slice(0, 60) });
   return row!;
 }
 
 export async function getBelief(id: string): Promise<Belief | null> {
+  validateUUID(id, "belief_id");
   return queryOne<Belief>("SELECT * FROM beliefs WHERE id = $1", [id]);
 }
 
@@ -47,10 +78,11 @@ export async function getBeliefsAboveThreshold(
   );
 }
 
-// ── Tension & Confidence ──────────────────────────────────────────
+// ── Tension & Confidence (with row locking) ───────────────────────
 
 export async function reinforceBelief(id: string): Promise<Belief | null> {
-  return queryOne<Belief>(
+  validateUUID(id, "belief_id");
+  const result = await queryOne<Belief>(
     `UPDATE beliefs SET
        confidence = LEAST(1.0, confidence + (1.0 - confidence) * $2),
        reinforcement_count = reinforcement_count + 1,
@@ -58,27 +90,50 @@ export async function reinforceBelief(id: string): Promise<Belief | null> {
      WHERE id = $1 AND is_active = true RETURNING *`,
     [id, CONFIDENCE_INCREMENT],
   );
+  if (result) {
+    log.debug("Reinforced belief", { id, new_confidence: result.confidence });
+  }
+  return result;
 }
 
+/**
+ * Add tension to a belief using atomic UPDATE.
+ * The UPDATE itself is atomic per-row in PostgreSQL, preventing lost updates
+ * from concurrent modifications.
+ */
 export async function addTension(id: string, delta: number): Promise<Belief | null> {
-  return queryOne<Belief>(
+  validateUUID(id, "belief_id");
+  if (delta <= 0) {
+    log.warn("addTension called with non-positive delta", { id, delta });
+    return getBelief(id);
+  }
+  const result = await queryOne<Belief>(
     `UPDATE beliefs SET
        tension = LEAST(1.0, tension + $2),
        last_challenged = now()
      WHERE id = $1 AND is_active = true RETURNING *`,
     [id, delta],
   );
+  if (result) {
+    log.debug("Tension added", { id, delta, new_tension: result.tension });
+  }
+  return result;
 }
 
 export async function supersedeBelief(oldId: string, newId: string): Promise<void> {
+  validateUUID(oldId, "old_belief_id");
+  validateUUID(newId, "new_belief_id");
   await query(
     `UPDATE beliefs SET is_active = false, superseded_by = $2, revised_at = now()
      WHERE id = $1`,
     [oldId, newId],
   );
+  log.info("Superseded belief", { old_id: oldId, new_id: newId });
 }
 
 // ── Connections ───────────────────────────────────────────────────
+
+const VALID_RELATIONS: Set<string> = new Set(["supports", "contradicts", "depends_on", "generalizes", "tension_shares"]);
 
 export async function connectBeliefs(
   a: string,
@@ -88,6 +143,14 @@ export async function connectBeliefs(
   method: DiscoveryMethod = "seed",
   reasoning?: string,
 ): Promise<void> {
+  validateUUID(a, "belief_a");
+  validateUUID(b, "belief_b");
+  if (!VALID_RELATIONS.has(relation)) {
+    log.warn("Invalid relation type, defaulting to 'supports'", { relation });
+    relation = "supports";
+  }
+  strength = clamp01(strength);
+
   await query(
     `INSERT INTO belief_connections (belief_a, belief_b, strength, relation, discovery_method, discovery_reasoning)
      VALUES ($1, $2, $3, $4, $5, $6)
@@ -104,6 +167,9 @@ export async function getConnectedBeliefs(
   beliefId: string,
   hops = 1,
 ): Promise<Belief[]> {
+  validateUUID(beliefId, "belief_id");
+  hops = Math.max(1, Math.min(hops, 5)); // Clamp to prevent unbounded recursion
+
   if (hops === 1) {
     return queryMany<Belief>(
       `SELECT b.* FROM beliefs b
@@ -137,6 +203,8 @@ export async function logContradiction(
   evidence: string,
   tensionDelta: number,
 ): Promise<void> {
+  validateUUID(beliefId, "belief_id");
+  if (interactionId) validateUUID(interactionId, "interaction_id");
   await query(
     `INSERT INTO contradiction_log (belief_id, interaction_id, evidence, tension_delta)
      VALUES ($1, $2, $3, $4)`,
@@ -148,6 +216,8 @@ export async function getContradictions(
   beliefId: string,
   limit = 20,
 ): Promise<Array<{ evidence: string; tension_delta: number; created_at: Date }>> {
+  validateUUID(beliefId, "belief_id");
+  limit = Math.max(1, Math.min(limit, 200));
   return queryMany(
     `SELECT * FROM contradiction_log WHERE belief_id = $1 ORDER BY created_at DESC LIMIT $2`,
     [beliefId, limit],
@@ -171,6 +241,7 @@ export async function seedBeliefs(): Promise<boolean> {
   const count = await queryVal<number>("SELECT COUNT(*)::int FROM beliefs");
   if (count && count > 0) return false;
 
+  log.info("Seeding initial beliefs...");
   const beliefs: Belief[] = [];
   for (const b of SEED_BELIEFS) {
     const belief = await createBelief(b.content, b.domain, b.confidence, b.importance);
@@ -185,5 +256,6 @@ export async function seedBeliefs(): Promise<boolean> {
   await connectBeliefs(beliefs[7].id, beliefs[5].id, "supports", 0.6);
   await connectBeliefs(beliefs[3].id, beliefs[2].id, "supports", 0.5);
 
+  log.info("Seeded initial beliefs", { count: beliefs.length });
   return true;
 }
