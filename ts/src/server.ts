@@ -391,6 +391,73 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
 
     // ════════════════════════════════════════════════════════
+    // CHAT STREAM (SSE — agentic tool loop with live events)
+    // POST /api/chat/stream → text/event-stream
+    // Events: thinking, tool_call, tool_result, response, revision, done
+    // ════════════════════════════════════════════════════════
+    if (path === "/api/chat/stream" && method === "POST") {
+      const body = parseJson(await readBody(req));
+      const message = body?.message ?? "";
+      const sessionId = body?.session_id ?? "dashboard";
+
+      if (!message.trim()) return json(res, { error: "empty message" }, 400);
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+        "X-Accel-Buffering": "no",
+      });
+
+      const sendEvent = (event: string, data: any) => {
+        if (!res.writableEnded) {
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
+      };
+
+      log("info", "chat.stream", `SSE session=${sessionId}: ${message.slice(0, 60)}`);
+      sendEvent("thinking", { session_id: sessionId, iteration: 0 });
+
+      try {
+        const result = await processInteraction(
+          message,
+          sessionId,
+          (rev) => {
+            sendEvent("revision", rev);
+            broadcast("revision", rev);
+            log("info", "revision", `Phase transition: ${rev.old_belief?.slice(0, 40)} → ${rev.new_belief?.slice(0, 40)}`);
+          },
+          (event, data) => sendEvent(event, data),
+        );
+
+        sendEvent("response", {
+          text: result.response,
+          dissatisfaction: result.dissatisfaction,
+          dissatisfaction_state: result.dissatisfaction_state,
+          evidence_extracted: result.evidence_extracted,
+          tools_used: result.tools_used ?? [],
+        });
+
+        sendEvent("done", {});
+
+        broadcast("state.update", {
+          dissatisfaction: result.dissatisfaction,
+          beliefs_count: result.beliefs_count,
+          evidence_extracted: result.evidence_extracted,
+        });
+
+        log("info", "chat.stream", `Done. d=${result.dissatisfaction.toFixed(3)} tools=${result.tools_used?.length ?? 0} evidence=${result.evidence_extracted}`);
+      } catch (err) {
+        sendEvent("error", { message: String(err) });
+        log("error", "chat.stream", `Error: ${err}`);
+      }
+
+      res.end();
+      return;
+    }
+
+    // ════════════════════════════════════════════════════════
     // CHAT ABORT (OpenClaw: chat.abort) — stub for now
     // ════════════════════════════════════════════════════════
     if (path === "/api/chat/abort" && method === "POST") {

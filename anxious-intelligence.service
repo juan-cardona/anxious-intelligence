@@ -1,0 +1,15 @@
+[Unit]
+Description=Anxious Intelligence — Cognitive Engine
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/clawd/projects/anxious-intelligence/ts
+ExecStart=/home/linuxbrew/.linuxbrew/bin/npx tsx src/main.ts
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/clawd/projects/anxious-intelligence/.env
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+
+[Install]
+WantedBy=default.target

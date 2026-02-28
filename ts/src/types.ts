@@ -92,4 +92,5 @@ export interface InteractionResult {
   pre_revisions: RevisionResult[];
   post_revisions: RevisionResult[];
   beliefs_count: number;
+  tools_used?: Array<{ name: string; input: any; output: string }>;
 }

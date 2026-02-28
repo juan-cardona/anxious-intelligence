@@ -191,6 +191,44 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .loading-page { display: flex; align-items: center; justify-content: center; height: 60vh; flex-direction: column; gap: 12px; color: var(--fg-3); }
 
+    /* ── Tool Call Cards ────────────────────────── */
+    .tool-call-card {
+      margin: 4px 24px;
+      border: 1px solid rgba(255,107,53,0.35);
+      border-radius: var(--radius-sm);
+      background: var(--bg-3);
+      font-family: var(--mono);
+      font-size: 12px;
+      overflow: hidden;
+    }
+    .tool-call-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; cursor: pointer; user-select: none;
+    }
+    .tool-call-header:hover { background: var(--bg-4); }
+    .tool-icon { font-size: 14px; }
+    .tool-name { color: var(--accent); font-weight: 500; min-width: 90px; }
+    .tool-summary { color: var(--fg-3); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tool-status { font-size: 10px; padding: 2px 8px; border-radius: 99px; }
+    .tool-status.running { background: rgba(234,179,8,0.15); color: var(--yellow); }
+    .tool-status.done    { background: rgba(34,197,94,0.15);  color: var(--green); }
+    .tool-toggle { font-size: 10px; color: var(--fg-3); transition: transform 0.15s; flex-shrink: 0; }
+    .tool-call-card.expanded .tool-call-body  { display: block; }
+    .tool-call-card.expanded .tool-toggle     { transform: rotate(90deg); }
+    .tool-call-body {
+      display: none; border-top: 1px solid var(--border); padding: 8px 12px;
+    }
+    .tool-io-label {
+      font-size: 9px; letter-spacing: 1px; text-transform: uppercase;
+      color: var(--fg-3); margin-bottom: 3px; margin-top: 6px;
+    }
+    .tool-io-label:first-child { margin-top: 0; }
+    .tool-call-body pre {
+      margin: 0; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+      color: var(--fg-2); max-height: 280px; overflow-y: auto;
+      background: var(--bg); padding: 8px; border-radius: 4px;
+    }
+
     /* ── Mobile ────────────────────────────────── */
     @media (max-width: 768px) {
       .sidebar { display: none; }
@@ -338,16 +376,40 @@ document.querySelectorAll('.nav-item').forEach(el => {
   });
 });
 
+// Chat DOM cache — survives tab switches
+let chatDomCache = null;
+
 async function loadTab(tab) {
   const c = document.getElementById('content');
+
+  // If leaving chat, detach and cache the DOM instead of destroying it
+  if (chatDomCache && chatDomCache.parentElement === c) {
+    c.removeChild(chatDomCache);
+  }
+
   c.innerHTML = '<div class="loading-page"><div class="spinner"></div> Loading...</div>';
   try {
+    if (tab === 'chat') {
+      c.innerHTML = '';
+      if (chatDomCache) {
+        // Restore cached chat DOM
+        c.appendChild(chatDomCache);
+        const input = document.getElementById('chat-input');
+        if (input) input.focus();
+        const msgs = document.getElementById('chat-msgs');
+        if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      } else {
+        await renderChat(c);
+        // Cache the chat container after first render
+        chatDomCache = c.querySelector('.chat-container');
+      }
+      return;
+    }
     switch(tab) {
       case 'overview': return renderOverview(c);
       case 'beliefs': return renderBeliefs(c);
       case 'graph': return renderGraph(c);
       case 'dissatisfaction': return renderDissatisfaction(c);
-      case 'chat': return renderChat(c);
       case 'sessions': return renderSessions(c);
       case 'revisions': return renderRevisions(c);
       case 'timeline': return renderTimeline(c);
@@ -647,17 +709,57 @@ async function renderDissatisfaction(c) {
   `;
 }
 
-// ── Chat ───────────────────────────────────────
-let chatMessages = [];
+// ── Chat (SSE-powered agentic stream) ──────────
 async function renderChat(c) {
   c.innerHTML = `
     <div class="chat-container">
       <div class="chat-messages" id="chat-msgs"></div>
       <div class="chat-input-container">
-        <input class="chat-input" id="chat-input" placeholder="Talk to the anxious system..." autofocus>
+        <input class="chat-input" id="chat-input" placeholder="Talk to the anxious system... (it has tools now)" autofocus>
       </div>
     </div>
   `;
+  // Load chat history — merge DB (completed) + localStorage (in-flight)
+  const msgs = document.getElementById('chat-msgs');
+  const dbIds = new Set();
+  try {
+    const history = await api('/api/interactions?session=dashboard&limit=50');
+    if (msgs && history.length) {
+      for (const h of history.reverse()) {
+        dbIds.add(h.user_message); // dedup key
+        appendMessage('user', h.user_message);
+        if (h.assistant_response) {
+          appendMessage('ai', h.assistant_response, {
+            dissatisfaction: h.dissatisfaction_at_time,
+            evidence_extracted: 0,
+          });
+        }
+      }
+    }
+  } catch (e) { console.error('Failed to load chat history:', e); }
+  // Restore any in-flight messages from localStorage that aren't in DB yet
+  try {
+    const pending = JSON.parse(localStorage.getItem('anxious-pending-msgs') || '[]');
+    for (const p of pending) {
+      if (!dbIds.has(p.user)) {
+        appendMessage('user', p.user);
+        if (p.toolCalls?.length) {
+          for (const tc of p.toolCalls) {
+            appendToolCallCard(tc);
+            if (tc.output) updateToolCallCard(tc);
+          }
+        }
+        if (p.response) {
+          appendMessage('ai', p.response, { dissatisfaction: p.dissatisfaction, evidence_extracted: p.evidence });
+        } else {
+          appendMessage('system', '⚠️ Response was interrupted — ask again to continue');
+        }
+      }
+    }
+    // Clear pending once DB has them
+    if (dbIds.size > 0) localStorage.removeItem('anxious-pending-msgs');
+  } catch (e) {}
+  if (msgs) msgs.scrollTop = msgs.scrollHeight;
   const input = document.getElementById('chat-input');
   input.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -665,23 +767,213 @@ async function renderChat(c) {
       const msg = input.value.trim();
       if (!msg) return;
       input.value = '';
+      input.disabled = true;
+
       appendMessage('user', msg);
-      appendThinking();
+      appendThinking('thinking...');
+
+      // Track in-flight state in localStorage
+      const pendingEntry = { user: msg, toolCalls: [], response: null, dissatisfaction: null, evidence: 0 };
+      const pending = JSON.parse(localStorage.getItem('anxious-pending-msgs') || '[]');
+      pending.push(pendingEntry);
+      localStorage.setItem('anxious-pending-msgs', JSON.stringify(pending));
+
       try {
-        const r = await apiPost('/api/chat', { message: msg, session_id: 'dashboard' });
-        removeThinking();
-        appendMessage('ai', r.response, r);
+        const response = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg, session_id: 'dashboard' })
+        });
+
+        if (!response.ok) {
+          removeThinking();
+          appendMessage('system', 'HTTP error ' + response.status);
+          input.disabled = false;
+          input.focus();
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let gotFirstContent = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const { events, remaining } = parseSSEBuffer(buffer);
+          buffer = remaining;
+          for (const evt of events) {
+            // Track tool calls and response in localStorage
+            if (evt.type === 'tool_call') {
+              pendingEntry.toolCalls.push({ name: evt.data.name, input: evt.data.input, output: null });
+              savePending();
+            } else if (evt.type === 'tool_result') {
+              const last = pendingEntry.toolCalls[pendingEntry.toolCalls.length - 1];
+              if (last) last.output = String(evt.data.output || '').slice(0, 500);
+              savePending();
+            } else if (evt.type === 'response') {
+              pendingEntry.response = evt.data.text;
+              pendingEntry.dissatisfaction = evt.data.dissatisfaction;
+              pendingEntry.evidence = evt.data.evidence_extracted;
+              savePending();
+            }
+            handleSSEEvent(evt.type, evt.data, () => {
+              if (!gotFirstContent) { gotFirstContent = true; removeThinking(); }
+            });
+          }
+        }
+        if (!gotFirstContent) removeThinking();
+        // Clear from pending — DB will have it now
+        const updated = JSON.parse(localStorage.getItem('anxious-pending-msgs') || '[]');
+        const idx = updated.findIndex(p => p.user === msg && p.response);
+        if (idx >= 0) updated.splice(idx, 1);
+        localStorage.setItem('anxious-pending-msgs', JSON.stringify(updated));
       } catch(err) {
         removeThinking();
         appendMessage('system', 'Error: ' + err.message);
       }
+
+      function savePending() {
+        try {
+          const arr = JSON.parse(localStorage.getItem('anxious-pending-msgs') || '[]');
+          const i = arr.findIndex(p => p.user === msg);
+          if (i >= 0) arr[i] = pendingEntry;
+          localStorage.setItem('anxious-pending-msgs', JSON.stringify(arr));
+        } catch(e) {}
+      }
+
+      input.disabled = false;
+      input.focus();
     }
   });
+}
+
+// Parse SSE buffer into events + remaining partial chunk
+function parseSSEBuffer(text) {
+  const events = [];
+  const parts = text.split('\n\n');
+  const remaining = parts.pop() ?? '';
+  for (const part of parts) {
+    let type = 'message', data = '';
+    for (const line of part.split('\n')) {
+      if (line.startsWith('event: ')) type = line.slice(7).trim();
+      else if (line.startsWith('data: ')) data = line.slice(6).trim();
+    }
+    if (data) {
+      try { events.push({ type, data: JSON.parse(data) }); } catch {}
+    }
+  }
+  return { events, remaining };
+}
+
+// Handle a single parsed SSE event
+let toolCallSeq = 0;
+function handleSSEEvent(type, data, onFirstContent) {
+  switch (type) {
+    case 'thinking': {
+      // Update existing spinner or no-op (spinner already showing)
+      const ind = document.getElementById('thinking-indicator');
+      if (ind) {
+        const lbl = ind.querySelector('.think-label');
+        if (lbl) lbl.textContent = data.iteration > 1 ? `thinking (iter ${data.iteration})...` : 'thinking...';
+      }
+      break;
+    }
+    case 'tool_call': {
+      onFirstContent();
+      appendToolCallCard(data);
+      break;
+    }
+    case 'tool_result': {
+      updateToolCallCard(data);
+      break;
+    }
+    case 'response': {
+      onFirstContent();
+      appendMessage('ai', data.text, data);
+      break;
+    }
+    case 'revision': {
+      appendRevisionToChat(data);
+      break;
+    }
+    case 'error': {
+      onFirstContent();
+      appendMessage('system', 'Error: ' + (data.message || 'unknown'));
+      break;
+    }
+  }
+}
+
+// Tool icon map
+function toolIcon(name) {
+  return { bash: '⚡', read_file: '📄', write_file: '✏️', web_search: '🔍', web_fetch: '🌐' }[name] || '🔧';
+}
+
+// Append a tool call card (pending result)
+function appendToolCallCard(data) {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  const seq = ++toolCallSeq;
+  const cardId = `tool-card-${seq}`;
+  const inputSummary = Object.values(data.input || {}).join(' ').slice(0, 60);
+
+  const div = document.createElement('div');
+  div.id = cardId;
+  div.setAttribute('data-tool', data.name);
+  div.className = 'tool-call-card';
+  div.innerHTML = `
+    <div class="tool-call-header" onclick="this.parentElement.classList.toggle('expanded')">
+      <span class="tool-icon">${toolIcon(data.name)}</span>
+      <span class="tool-name">${escapeHtml(data.name)}</span>
+      <span class="tool-summary">${escapeHtml(inputSummary)}</span>
+      <span class="tool-status running" id="${cardId}-status">running</span>
+      <span class="tool-toggle">▶</span>
+    </div>
+    <div class="tool-call-body">
+      <div class="tool-io-label">INPUT</div>
+      <pre>${escapeHtml(JSON.stringify(data.input, null, 2))}</pre>
+      <div class="tool-io-label">OUTPUT</div>
+      <pre id="${cardId}-output" style="color:var(--fg-3);font-style:italic">waiting...</pre>
+    </div>
+  `;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// Fill in tool result when it arrives
+function updateToolCallCard(data) {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  // Find last card for this tool name that has status 'running'
+  const cards = msgs.querySelectorAll('.tool-call-card');
+  for (let i = cards.length - 1; i >= 0; i--) {
+    if (cards[i].getAttribute('data-tool') === data.name) {
+      const statusEl = cards[i].querySelector('.tool-status');
+      if (statusEl?.classList.contains('running')) {
+        statusEl.textContent = 'done';
+        statusEl.className = 'tool-status done';
+        const outEl = cards[i].querySelector('[id$="-output"]');
+        if (outEl) outEl.innerHTML = escapeHtml(String(data.output || '')).replace(/\n/g, '<br>');
+        break;
+      }
+    }
+  }
 }
 
 function appendMessage(role, text, meta) {
   const msgs = document.getElementById('chat-msgs');
   if (!msgs) return;
+  if (role === 'system') {
+    const div = document.createElement('div');
+    div.style.cssText = 'padding:6px 24px;font-size:12px;color:var(--red);font-family:var(--mono)';
+    div.textContent = text;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return;
+  }
   const div = document.createElement('div');
   div.className = 'chat-msg' + (role === 'user' ? ' chat-msg-user' : '');
   const cls = role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai';
@@ -690,19 +982,21 @@ function appendMessage(role, text, meta) {
   if (meta && role === 'ai') {
     const metaDiv = document.createElement('div');
     metaDiv.className = 'chat-meta';
-    metaDiv.textContent = `d=${meta.dissatisfaction?.toFixed(3) || '?'} evidence=${meta.evidence_extracted || 0}`;
+    const toolsLabel = meta.tools_used?.length ? ` tools=${meta.tools_used.length}` : '';
+    metaDiv.textContent = `d=${(meta.dissatisfaction ?? meta.d)?.toFixed(3) || '?'} evidence=${meta.evidence_extracted || 0}${toolsLabel}`;
     msgs.appendChild(metaDiv);
   }
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-function appendThinking() {
+function appendThinking(label) {
   const msgs = document.getElementById('chat-msgs');
   if (!msgs) return;
+  if (document.getElementById('thinking-indicator')) return;
   const div = document.createElement('div');
   div.className = 'chat-msg';
   div.id = 'thinking-indicator';
-  div.innerHTML = `<div class="chat-bubble chat-bubble-ai"><div class="spinner"></div> thinking...</div>`;
+  div.innerHTML = `<div class="chat-bubble chat-bubble-ai"><div class="spinner"></div> <span class="think-label">${label || 'thinking...'}</span></div>`;
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
 }
@@ -720,6 +1014,7 @@ function appendRevisionToChat(rev) {
     <div class="new" style="margin-top:4px">→ ${escapeHtml(rev.new_belief || '')}</div>
   </div>`;
   msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
 }
 
 // ── Sessions ───────────────────────────────────
