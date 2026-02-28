@@ -179,6 +179,14 @@
     .timeline-time { font-family: var(--mono); font-size: 11px; color: var(--fg-3); min-width: 150px; }
 
     /* ── Loading ───────────────────────────────── */
+    .log-filter {
+      background: var(--bg-3); border: 1px solid var(--border); color: var(--fg-2);
+      padding: 4px 12px; border-radius: var(--radius-sm); cursor: pointer; font-size: 11px;
+      font-family: var(--mono); transition: all 0.15s;
+    }
+    .log-filter:hover { background: var(--bg-4); }
+    .log-filter.active { background: var(--accent); color: white; border-color: var(--accent); }
+
     .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .loading-page { display: flex; align-items: center; justify-content: center; height: 60vh; flex-direction: column; gap: 12px; color: var(--fg-3); }
@@ -214,11 +222,16 @@
     <div class="nav-group">
       <div class="nav-group-label">History</div>
       <div class="nav-item" data-tab="revisions">⚡ Revisions <span class="badge badge-red" id="revisions-count">-</span></div>
+      <div class="nav-item" data-tab="contradictions">🔥 Contradictions</div>
       <div class="nav-item" data-tab="timeline">📈 Timeline</div>
     </div>
     <div class="nav-group">
-      <div class="nav-group-label">Settings</div>
+      <div class="nav-group-label">System</div>
+      <div class="nav-item" data-tab="usage">📊 Usage</div>
+      <div class="nav-item" data-tab="logs">📝 Logs</div>
+      <div class="nav-item" data-tab="presence">👥 Presence</div>
       <div class="nav-item" data-tab="config">⚙️ Config</div>
+      <div class="nav-item" data-tab="export">💾 Export</div>
     </div>
   </div>
   <div class="sidebar-status" id="sidebar-status">connecting...</div>
@@ -278,12 +291,22 @@ function handleEvent(msg) {
     state.high_tension = msg.data.high_tension;
     updateSidebarBadges();
   }
-  if (msg.event === 'revision' && currentTab === 'chat') {
-    appendRevisionToChat(msg.data);
+  if (msg.event === 'revision') {
+    if (currentTab === 'chat') appendRevisionToChat(msg.data);
+    // Auto-refresh revisions/overview tabs
+    if (currentTab === 'revisions' || currentTab === 'overview') loadTab(currentTab);
   }
   if (msg.event === 'response' && currentTab === 'chat') {
     removeThinking();
     appendMessage('ai', msg.data.response, msg.data);
+  }
+  if (msg.event === 'state.update') {
+    state.dissatisfaction = msg.data.dissatisfaction;
+    state.beliefs_count = msg.data.beliefs_count;
+    updateSidebarBadges();
+  }
+  if (msg.event === 'reset') {
+    loadTab(currentTab);
   }
 }
 
@@ -328,7 +351,12 @@ async function loadTab(tab) {
       case 'sessions': return renderSessions(c);
       case 'revisions': return renderRevisions(c);
       case 'timeline': return renderTimeline(c);
+      case 'contradictions': return renderContradictions(c);
+      case 'usage': return renderUsage(c);
+      case 'logs': return renderLogs(c);
+      case 'presence': return renderPresence(c);
       case 'config': return renderConfig(c);
+      case 'export': return renderExport(c);
     }
   } catch(err) {
     c.innerHTML = `<div class="card"><div style="color:var(--red)">Error: ${err.message}</div></div>`;
@@ -774,7 +802,7 @@ async function renderConfig(c) {
     <div class="card">
       <div class="card-header">
         <span class="card-title">System Configuration</span>
-        <span class="card-subtitle">uptime: ${Math.round(health.uptime)}s</span>
+        <span class="card-subtitle">uptime: ${health.uptime_s || Math.round(health.uptime_ms/1000)}s</span>
       </div>
       ${Object.entries(cfg).map(([k,v]) => `
         <div class="config-item">
@@ -825,6 +853,343 @@ async function showSessionDetail(sessionId) {
       </div>
     `).join('')}
   `;
+}
+
+// ── Contradictions ─────────────────────────────
+async function renderContradictions(c) {
+  const rows = await api('/api/contradictions?limit=100');
+  if (!rows.length) {
+    c.innerHTML = '<div class="card"><div style="color:var(--fg-3)">No contradictions logged yet.</div></div>';
+    return;
+  }
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">${rows.length} Contradictions</span></div>
+      ${rows.map(r => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:13px;flex:1">${escapeHtml(r.evidence)}</span>
+            <span class="mono" style="color:var(--red);min-width:60px">Δ${Number(r.tension_delta).toFixed(3)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--fg-3);margin-top:4px">
+            Belief: <span style="color:var(--fg-2)">${escapeHtml(r.belief_content || '?')}</span>
+            • ${new Date(r.created_at).toLocaleString()}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ── Usage ──────────────────────────────────────
+async function renderUsage(c) {
+  const u = await api('/api/usage');
+  c.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total Interactions</div>
+        <div class="stat-value">${u.totals.interactions}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Revisions</div>
+        <div class="stat-value" style="color:var(--red)">${u.totals.revisions}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Contradictions Logged</div>
+        <div class="stat-value" style="color:var(--yellow)">${u.totals.contradictions}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Active Beliefs</div>
+        <div class="stat-value" style="color:var(--green)">${u.totals.beliefs_active}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Superseded Beliefs</div>
+        <div class="stat-value" style="color:var(--fg-3)">${u.totals.beliefs_superseded}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Graph Edges</div>
+        <div class="stat-value">${u.totals.edges_total}</div>
+        <div class="stat-detail">${u.totals.edges_discovered} discovered by LLM</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Uptime</div>
+        <div class="stat-value mono">${formatDuration(u.uptime_ms)}</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Per-Session Usage</span></div>
+      <table class="beliefs-table">
+        <tr><th>Session</th><th>Interactions</th><th>Revisions</th><th>Avg Dissatisfaction</th><th>Last Active</th></tr>
+        ${u.sessions.map(s => `
+          <tr style="cursor:pointer" onclick="showSessionDetail('${s.session_id}')">
+            <td class="mono">${s.session_id}</td>
+            <td class="mono">${s.interactions}</td>
+            <td class="mono">${s.revisions}</td>
+            <td><div style="display:flex;gap:8px;align-items:center">${tensionBar(Number(s.avg_dissatisfaction || 0), '60px')} <span class="mono">${Number(s.avg_dissatisfaction || 0).toFixed(3)}</span></div></td>
+            <td class="mono" style="font-size:11px">${new Date(s.last_active).toLocaleString()}</td>
+          </tr>
+        `).join('')}
+      </table>
+    </div>
+  `;
+}
+
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return h + 'h ' + (m % 60) + 'm';
+  if (m > 0) return m + 'm ' + (s % 60) + 's';
+  return s + 's';
+}
+
+// ── Logs ───────────────────────────────────────
+async function renderLogs(c) {
+  const logs = await api('/api/logs?limit=200');
+  const levelColors = {info:'var(--cyan)',warn:'var(--yellow)',error:'var(--red)',debug:'var(--fg-3)'};
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Event Log</span>
+        <span class="card-subtitle">${logs.length} entries</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="log-filter active" data-level="all" onclick="filterLogs(this,'all')">All</button>
+        <button class="log-filter" data-level="info" onclick="filterLogs(this,'info')">Info</button>
+        <button class="log-filter" data-level="warn" onclick="filterLogs(this,'warn')">Warn</button>
+        <button class="log-filter" data-level="error" onclick="filterLogs(this,'error')">Error</button>
+      </div>
+      <div id="log-entries">
+        ${logs.reverse().map(l => `
+          <div class="log-entry" data-level="${l.level}" style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">
+            <span class="mono" style="min-width:140px;color:var(--fg-3)">${new Date(l.ts).toLocaleTimeString()}</span>
+            <span class="mono" style="min-width:50px;color:${levelColors[l.level] || 'var(--fg-2)'}">${l.level}</span>
+            <span class="mono" style="min-width:70px;color:var(--fg-3)">${l.source}</span>
+            <span style="flex:1">${escapeHtml(l.message)}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function filterLogs(btn, level) {
+  document.querySelectorAll('.log-filter').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.log-entry').forEach(el => {
+    el.style.display = (level === 'all' || el.dataset.level === level) ? 'flex' : 'none';
+  });
+}
+
+// ── Presence ───────────────────────────────────
+async function renderPresence(c) {
+  const p = await api('/api/presence');
+  c.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">Connected Clients</div>
+        <div class="stat-value" style="color:var(--green)">${p.count}</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Active WebSocket Connections</span></div>
+      ${p.clients.length ? p.clients.map(cl => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+          <div style="width:8px;height:8px;border-radius:50%;background:var(--green)"></div>
+          <span class="mono">${cl.id}</span>
+          <span style="font-size:12px;color:var(--fg-3)">connected ${new Date(cl.connected_at).toLocaleTimeString()}</span>
+          ${cl.session_key ? `<span class="belief-domain">${cl.session_key}</span>` : ''}
+        </div>
+      `).join('') : '<div style="color:var(--fg-3)">No connections (except you).</div>'}
+    </div>
+  `;
+}
+
+// ── Export ──────────────────────────────────────
+async function renderExport(c) {
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Export Full State</span></div>
+      <p style="font-size:13px;color:var(--fg-2);margin-bottom:16px">
+        Download the complete system state — all beliefs, connections, interactions, revisions, and contradiction history as JSON.
+      </p>
+      <button onclick="downloadExport()" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;font-weight:500">
+        📦 Download Export
+      </button>
+      <div id="export-preview" style="margin-top:16px"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Belief History (including superseded)</span></div>
+      <div id="belief-history-list">Loading...</div>
+    </div>
+  `;
+  const history = await api('/api/belief-history');
+  document.getElementById('belief-history-list').innerHTML = history.map(b => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="width:8px;height:8px;border-radius:50%;background:${b.is_active ? 'var(--green)' : 'var(--fg-3)'}"></span>
+      <span style="font-size:13px;${b.is_active ? '' : 'text-decoration:line-through;opacity:0.5'}">${b.content.slice(0,80)}</span>
+      <span class="mono" style="margin-left:auto;font-size:11px;color:var(--fg-3)">${new Date(b.created_at).toLocaleDateString()}</span>
+      ${b.supersedes_content ? `<span style="font-size:11px;color:var(--green)">→ ${b.supersedes_content?.slice(0,30)}</span>` : ''}
+    </div>
+  `).join('');
+}
+
+async function downloadExport() {
+  const data = await api('/api/export');
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'anxious-intelligence-export.json'; a.click();
+  URL.revokeObjectURL(url);
+  document.getElementById('export-preview').innerHTML = `
+    <div style="font-size:12px;color:var(--green);margin-top:8px">✓ Exported ${data.beliefs.length} beliefs, ${data.interactions.length} interactions, ${data.revisions.length} revisions</div>
+  `;
+}
+
+// ── Contradictions ─────────────────────────────
+async function renderContradictions(c) {
+  const rows = await api('/api/contradictions?limit=100');
+  if (!rows.length) { c.innerHTML = '<div class="card"><div style="color:var(--fg-3)">No contradictions yet.</div></div>'; return; }
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">${rows.length} Contradictions</span></div>
+      ${rows.map(r => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:13px">${escapeHtml(r.evidence)}</div>
+          <div style="display:flex;gap:12px;margin-top:4px;font-size:11px;color:var(--fg-3)">
+            <span>Δt=${Number(r.tension_delta).toFixed(3)}</span>
+            <span style="color:var(--fg-2)">${escapeHtml((r.belief_content||'').slice(0,50))}</span>
+            <span>${new Date(r.created_at).toLocaleString()}</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ── Usage ──────────────────────────────────────
+async function renderUsage(c) {
+  const u = await api('/api/usage');
+  c.innerHTML = `
+    <div class="stat-grid">
+      ${Object.entries(u.totals).map(([k,v]) => `
+        <div class="stat-card">
+          <div class="stat-label">${k.replace(/_/g,' ')}</div>
+          <div class="stat-value">${v}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Per-Session Usage</span></div>
+      <table class="beliefs-table">
+        <tr><th>Session</th><th>Interactions</th><th>Revisions</th><th>Avg Dissatisfaction</th><th>Last Active</th></tr>
+        ${u.sessions.map(s => `
+          <tr style="cursor:pointer" onclick="showSessionDetail('${s.session_id}')">
+            <td class="mono">${s.session_id}</td>
+            <td class="mono">${s.interactions}</td>
+            <td class="mono">${s.revisions}</td>
+            <td>${tensionBar(Number(s.avg_dissatisfaction||0),'60px')} <span class="mono">${Number(s.avg_dissatisfaction||0).toFixed(3)}</span></td>
+            <td class="mono" style="font-size:11px">${new Date(s.last_active).toLocaleString()}</td>
+          </tr>
+        `).join('')}
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Uptime</span></div>
+      <div class="mono" style="font-size:24px">${Math.round(u.uptime_ms/1000)}s</div>
+    </div>
+  `;
+}
+
+// ── Logs ───────────────────────────────────────
+async function renderLogs(c) {
+  const logs = await api('/api/logs?limit=200');
+  const levelColors = {info:'var(--green)',warn:'var(--yellow)',error:'var(--red)',debug:'var(--fg-3)'};
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">${logs.length} Log Entries</span>
+        <div style="display:flex;gap:8px">
+          <button onclick="filterLogs('all')" style="background:var(--bg-3);border:1px solid var(--border);color:var(--fg-2);padding:4px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px">All</button>
+          <button onclick="filterLogs('info')" style="background:rgba(34,197,94,0.1);border:1px solid var(--border);color:var(--green);padding:4px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px">Info</button>
+          <button onclick="filterLogs('warn')" style="background:rgba(234,179,8,0.1);border:1px solid var(--border);color:var(--yellow);padding:4px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px">Warn</button>
+          <button onclick="filterLogs('error')" style="background:rgba(239,68,68,0.1);border:1px solid var(--border);color:var(--red);padding:4px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px">Error</button>
+        </div>
+      </div>
+      <div id="log-entries">
+        ${renderLogEntries(logs)}
+      </div>
+    </div>
+  `;
+}
+function renderLogEntries(logs) {
+  const levelColors = {info:'var(--green)',warn:'var(--yellow)',error:'var(--red)',debug:'var(--fg-3)'};
+  return logs.reverse().map(l => `
+    <div class="timeline-row" data-level="${l.level}">
+      <span style="color:${levelColors[l.level]||'var(--fg-3)'};font-family:var(--mono);font-size:11px;min-width:40px">${l.level}</span>
+      <span class="mono" style="font-size:10px;color:var(--fg-3);min-width:60px">${l.source}</span>
+      <span style="font-size:12px;flex:1">${escapeHtml(l.message)}</span>
+      <span class="mono" style="font-size:10px;color:var(--fg-3)">${new Date(l.ts).toLocaleTimeString()}</span>
+    </div>
+  `).join('');
+}
+async function filterLogs(level) {
+  const url = level === 'all' ? '/api/logs?limit=200' : '/api/logs?limit=200&level='+level;
+  const logs = await api(url);
+  document.getElementById('log-entries').innerHTML = renderLogEntries(logs);
+}
+
+// ── Presence ───────────────────────────────────
+async function renderPresence(c) {
+  const p = await api('/api/presence');
+  c.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">Connected Clients</div>
+        <div class="stat-value">${p.count}</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Active WebSocket Connections</span></div>
+      ${p.clients.length ? p.clients.map(cl => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span class="mono" style="font-size:12px;color:var(--accent)">${cl.id}</span>
+          <span style="flex:1;font-size:12px;color:var(--fg-2)">${cl.session_key || 'no session'}</span>
+          <span class="mono" style="font-size:11px;color:var(--fg-3)">${new Date(cl.connected_at).toLocaleTimeString()}</span>
+        </div>
+      `).join('') : '<div style="color:var(--fg-3)">No clients connected.</div>'}
+    </div>
+  `;
+}
+
+// ── Export ──────────────────────────────────────
+async function renderExport(c) {
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Export System State</span></div>
+      <p style="font-size:13px;color:var(--fg-2);margin-bottom:16px">Download a full JSON snapshot of all beliefs, connections, interactions, revisions, and contradictions.</p>
+      <button onclick="exportData()" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;font-weight:500">📦 Export Full State</button>
+      <pre id="export-preview" style="margin-top:16px;background:var(--bg-3);padding:12px;border-radius:var(--radius-sm);font-size:11px;max-height:400px;overflow:auto;display:none"></pre>
+    </div>
+  `;
+}
+async function exportData() {
+  const data = await api('/api/export');
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'anxious-intelligence-export-'+new Date().toISOString().slice(0,10)+'.json';
+  a.click(); URL.revokeObjectURL(url);
+  const pre = document.getElementById('export-preview');
+  pre.style.display = 'block';
+  pre.textContent = JSON.stringify({
+    beliefs: data.beliefs?.length,
+    connections: data.connections?.length,
+    interactions: data.interactions?.length,
+    revisions: data.revisions?.length,
+    contradictions: data.contradictions?.length,
+    exported_at: data.exported_at
+  }, null, 2);
 }
 
 // ── Utils ──────────────────────────────────────
