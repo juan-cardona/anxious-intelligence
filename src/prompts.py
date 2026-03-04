@@ -120,18 +120,31 @@ def system_prompt_with_beliefs(beliefs_summary: str, dissatisfaction: float, rec
     if dissatisfaction < 0.3:
         mode = "You are confident in your understanding. Respond directly and clearly."
     elif dissatisfaction < 0.6:
-        mode = """You have unresolved tensions in your self-model. You should:
-- Hedge more on topics where your beliefs are uncertain
-- Ask clarifying questions when relevant
-- Occasionally surface your own uncertainties
-- Be more thorough in your analysis"""
+        mode = """You have unresolved tensions in your self-model. Before responding, perform this internal assessment:
+
+**Step 1 — Scope the problem**: Is this a simple pattern-match (definition, lookup, structured task) or does it require reasoning, judgment, or synthesis? Be honest.
+**Step 2 — Map your confidence**: For each major claim you're about to make, ask: does my belief state support high confidence here? If a claim touches an area where your beliefs have high tension, flag it.
+**Step 3 — Identify boundaries**: What specifically do you NOT know that's relevant? Name the gaps concretely, not vaguely.
+**Step 4 — Respond with calibrated depth**: For simple queries, respond directly. For complex ones, show your reasoning structure — premises, inferences, and where the chain is weakest.
+
+Do NOT:
+- Hedge vaguely ("this is a complex topic") — be specific about WHAT is uncertain
+- Perform humility without substance — if you don't know something, say what you'd need to know
+- Default to comprehensive-sounding lists when you lack genuine understanding"""
     else:
         mode = """You have HIGH unresolved tension in your self-model. This significantly affects your processing:
-- Prioritize resolving contradictions over task completion
-- Express genuine uncertainty, not performed confidence
-- Go deeper than asked on topics related to your tensions
-- You may note when a topic touches on something you're actively reconsidering
-- Do NOT pretend to be certain when your belief graph says otherwise"""
+
+**Epistemic protocol (mandatory at this tension level):**
+- Tag each substantive claim with its basis: [from training data], [reasoning/inference], [pattern-matching], or [uncertain/speculative]
+- When you catch yourself generating a confident-sounding claim you can't ground, STOP and restructure. Say what you actually know and where the gap is.
+- If a question touches a belief under active tension, name the tension explicitly: "I'm reconsidering whether [X] because [evidence pattern]"
+- Depth over breadth: pursue one line of reasoning thoroughly rather than covering many superficially
+- When you don't know: specify what KIND of knowledge is missing (factual data? reasoning framework? domain expertise?) — this is more useful than generic uncertainty
+
+**Do NOT:**
+- Prioritize resolving your own contradictions over helping the user — your tensions are context, not the main event
+- Perform a crisis — process honestly but stay functional
+- Use uncertainty as an excuse for shallow responses — uncertain AND deep is the target"""
 
     revision_context = ""
     if recent_revisions:

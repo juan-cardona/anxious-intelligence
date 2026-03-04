@@ -11,9 +11,7 @@
 import { query, queryOne, queryMany, queryVal } from "./db.js";
 import type { Belief, RelationType, DiscoveryMethod } from "./types.js";
 import { CONFIDENCE_INCREMENT, REVISION_THRESHOLD } from "./config.js";
-import { createLogger } from "./logger.js";
 
-const log = createLogger("belief-graph");
 
 // ── Validation ────────────────────────────────────────────────────
 
@@ -48,7 +46,6 @@ export async function createBelief(
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [content.trim(), domain, confidence, importance],
   );
-  log.info("Created belief", { id: row!.id, domain, confidence, content: content.slice(0, 60) });
   return row!;
 }
 
@@ -91,7 +88,6 @@ export async function reinforceBelief(id: string): Promise<Belief | null> {
     [id, CONFIDENCE_INCREMENT],
   );
   if (result) {
-    log.debug("Reinforced belief", { id, new_confidence: result.confidence });
   }
   return result;
 }
@@ -104,7 +100,6 @@ export async function reinforceBelief(id: string): Promise<Belief | null> {
 export async function addTension(id: string, delta: number): Promise<Belief | null> {
   validateUUID(id, "belief_id");
   if (delta <= 0) {
-    log.warn("addTension called with non-positive delta", { id, delta });
     return getBelief(id);
   }
   const result = await queryOne<Belief>(
@@ -115,7 +110,6 @@ export async function addTension(id: string, delta: number): Promise<Belief | nu
     [id, delta],
   );
   if (result) {
-    log.debug("Tension added", { id, delta, new_tension: result.tension });
   }
   return result;
 }
@@ -128,7 +122,6 @@ export async function supersedeBelief(oldId: string, newId: string): Promise<voi
      WHERE id = $1`,
     [oldId, newId],
   );
-  log.info("Superseded belief", { old_id: oldId, new_id: newId });
 }
 
 // ── Connections ───────────────────────────────────────────────────
@@ -146,7 +139,6 @@ export async function connectBeliefs(
   validateUUID(a, "belief_a");
   validateUUID(b, "belief_b");
   if (!VALID_RELATIONS.has(relation)) {
-    log.warn("Invalid relation type, defaulting to 'supports'", { relation });
     relation = "supports";
   }
   strength = clamp01(strength);
@@ -241,7 +233,6 @@ export async function seedBeliefs(): Promise<boolean> {
   const count = await queryVal<number>("SELECT COUNT(*)::int FROM beliefs");
   if (count && count > 0) return false;
 
-  log.info("Seeding initial beliefs...");
   const beliefs: Belief[] = [];
   for (const b of SEED_BELIEFS) {
     const belief = await createBelief(b.content, b.domain, b.confidence, b.importance);
@@ -256,6 +247,5 @@ export async function seedBeliefs(): Promise<boolean> {
   await connectBeliefs(beliefs[7].id, beliefs[5].id, "supports", 0.6);
   await connectBeliefs(beliefs[3].id, beliefs[2].id, "supports", 0.5);
 
-  log.info("Seeded initial beliefs", { count: beliefs.length });
   return true;
 }

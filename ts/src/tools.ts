@@ -1,210 +1,276 @@
 /**
- * Tool definitions and execution layer.
- * 
- * Tools: bash, read_file, write_file, web_search, web_fetch, delegate
- * 
- * The `delegate` tool spawns a focused sub-agent with fresh context.
- * Progress tools are built into the orchestrator, not exposed as tools
- * (the orchestrator writes progress automatically).
+ * Tool system — gives the Anxious Intelligence agent hands.
+ *
+ * Tools are passed to Claude as tool definitions. The orchestrator
+ * executes them and feeds results back. Belief state modulates
+ * tool usage (high tension → verify before acting).
  */
 
-import { exec } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { promisify } from "node:util";
-import { runSubagent } from "./subagent.js";
+import { execSync, exec as execCb } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 
-const execAsync = promisify(exec);
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  input_schema: Record<string, any>;
+}
 
-// ── Tool Definitions (Claude tool_use format) ─────────────────────
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: Record<string, any>;
+}
 
-export const TOOL_DEFINITIONS = [
+export interface ToolResult {
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+}
+
+// ── Tool Definitions (Claude format) ──────────────────────────────
+
+export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "bash",
-    description:
-      "Run a shell command. Combine multiple commands with && or ; for efficiency. 30s timeout per call.",
+    description: "Execute a shell command and return stdout/stderr. Use for: running code, installing packages, checking system state, git operations, API calls with curl. Working directory is the project root.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        command: { type: "string" as const, description: "Shell command to run" },
+        command: { type: "string", description: "Shell command to execute" },
+        timeout: { type: "number", description: "Timeout in seconds (default 30)" },
       },
       required: ["command"],
     },
   },
   {
     name: "read_file",
-    description: "Read file contents. Max 100KB.",
+    description: "Read the contents of a file. Returns the full text content.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        path: { type: "string" as const, description: "Absolute or relative path" },
+        path: { type: "string", description: "Absolute or relative file path" },
+        limit: { type: "number", description: "Max lines to read (default: all)" },
       },
       required: ["path"],
     },
   },
   {
     name: "write_file",
-    description: "Write content to a file, creating directories as needed.",
+    description: "Write content to a file. Creates parent directories if needed. Overwrites existing files.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        path: { type: "string" as const, description: "Path to write to" },
-        content: { type: "string" as const, description: "Content to write" },
+        path: { type: "string", description: "File path to write" },
+        content: { type: "string", description: "Content to write" },
       },
       required: ["path", "content"],
     },
   },
   {
-    name: "web_search",
-    description: "Search the web via Brave Search. Returns top 5 results.",
+    name: "list_files",
+    description: "List files and directories at a path.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        query: { type: "string" as const, description: "Search query" },
+        path: { type: "string", description: "Directory path (default: .)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "web_search",
+    description: "Search the web using Brave Search API. Returns titles, URLs, and snippets.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        count: { type: "number", description: "Number of results (default 5, max 10)" },
       },
       required: ["query"],
     },
   },
   {
     name: "web_fetch",
-    description: "Fetch URL content as plain text (HTML stripped). Max 8KB returned.",
+    description: "Fetch a URL and extract readable text content (HTML → markdown).",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        url: { type: "string" as const, description: "URL to fetch" },
+        url: { type: "string", description: "URL to fetch" },
+        max_chars: { type: "number", description: "Max characters to return (default 10000)" },
       },
       required: ["url"],
     },
   },
   {
-    name: "delegate",
-    description:
-      "Delegate a subtask to a focused sub-agent with a FRESH context window. " +
-      "The sub-agent has its own tool loop (bash, read_file, write_file, web_search, web_fetch) " +
-      "and returns a concise result. Use for:\n" +
-      "- Reading/analyzing a large codebase (sub-agent gets full 200k context)\n" +
-      "- Research tasks that require many web searches\n" +
-      "- File operations across many files\n" +
-      "- Any subtask that would bloat the current context\n" +
-      "The sub-agent cannot delegate further (no recursion).",
+    name: "query_beliefs",
+    description: "Query your own belief system. Returns current beliefs, tensions, dissatisfaction. Use this for metacognition — understanding your own state before making decisions.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
-        task: {
-          type: "string" as const,
-          description: "Clear, specific description of what the sub-agent should do. Be explicit about expected output format.",
+        what: {
+          type: "string",
+          enum: ["beliefs", "dissatisfaction", "graph", "revisions"],
+          description: "What to query",
         },
       },
-      required: ["task"],
+      required: ["what"],
     },
   },
 ];
 
-/** Tools without delegate — used inside sub-agents to prevent recursion */
-export const TOOLS_NO_DELEGATE = TOOL_DEFINITIONS.filter((t) => t.name !== "delegate");
+// ── Tool Execution ────────────────────────────────────────────────
 
-// Shared state for delegate calls — needs system prompt from orchestrator
-let _currentSystemPrompt = "";
-let _currentSessionId = "default";
+const BRAVE_API_KEY = process.env.BRAVE_SEARCH_API_KEY ?? "";
 
-export function setDelegateContext(system: string, sessionId: string) {
-  _currentSystemPrompt = system;
-  _currentSessionId = sessionId;
+export async function executeTool(call: ToolCall): Promise<ToolResult> {
+  try {
+    switch (call.name) {
+      case "bash":
+        return executeBash(call);
+      case "read_file":
+        return executeReadFile(call);
+      case "write_file":
+        return executeWriteFile(call);
+      case "list_files":
+        return executeListFiles(call);
+      case "web_search":
+        return await executeWebSearch(call);
+      case "web_fetch":
+        return await executeWebFetch(call);
+      case "query_beliefs":
+        return await executeQueryBeliefs(call);
+      default:
+        return { tool_use_id: call.id, content: `Unknown tool: ${call.name}`, is_error: true };
+    }
+  } catch (err) {
+    return { tool_use_id: call.id, content: `Error: ${err}`, is_error: true };
+  }
 }
 
-// ── Execution ─────────────────────────────────────────────────────
+function executeBash(call: ToolCall): ToolResult {
+  const cmd = call.input.command as string;
+  const timeout = ((call.input.timeout as number) ?? 30) * 1000;
 
-export async function executeTool(
-  name: string,
-  input: Record<string, any>,
-): Promise<string> {
+  // Safety: block destructive commands without confirmation
+  const dangerous = /\brm\s+-rf\s+[\/~]|\bdd\s+if=|mkfs|fdisk/i;
+  if (dangerous.test(cmd)) {
+    return { tool_use_id: call.id, content: "Blocked: potentially destructive command. Use trash instead of rm.", is_error: true };
+  }
+
   try {
-    switch (name) {
-      case "bash": {
-        const { command } = input as { command: string };
-        try {
-          const { stdout, stderr } = await execAsync(command, {
-            timeout: 30_000,
-            maxBuffer: 512 * 1024,
-            killSignal: "SIGKILL",
-          });
-          const parts = [stdout.trim(), stderr ? `[stderr] ${stderr.trim()}` : ""].filter(Boolean);
-          return parts.join("\n") || "(no output)";
-        } catch (err: any) {
-          return `Exit ${err.code ?? "?"}: ${(err.stdout || "").trim()}\n${(err.stderr || "").trim()}`.trim();
-        }
-      }
-
-      case "read_file": {
-        const { path } = input as { path: string };
-        const buf = await readFile(path);
-        const MAX = 100 * 1024;
-        if (buf.length > MAX) {
-          return buf.slice(0, MAX).toString("utf8") + `\n[truncated — ${buf.length} bytes total]`;
-        }
-        return buf.toString("utf8");
-      }
-
-      case "write_file": {
-        const { path, content } = input as { path: string; content: string };
-        await mkdir(dirname(path), { recursive: true });
-        await writeFile(path, content, "utf8");
-        return `Written ${content.length} bytes to ${path}`;
-      }
-
-      case "web_search": {
-        const { query } = input as { query: string };
-        const key = process.env.BRAVE_API_KEY;
-        if (!key) return "Error: BRAVE_API_KEY not configured";
-        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`;
-        const resp = await fetch(url, {
-          headers: { "X-Subscription-Token": key, Accept: "application/json" },
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!resp.ok) return `Search error: ${resp.status}`;
-        const data = (await resp.json()) as any;
-        const results = data.web?.results ?? [];
-        if (!results.length) return "No results found.";
-        return results
-          .slice(0, 5)
-          .map((r: any, i: number) => `[${i + 1}] ${r.title}\n${r.url}\n${r.description || ""}`)
-          .join("\n\n");
-      }
-
-      case "web_fetch": {
-        const { url } = input as { url: string };
-        const resp = await fetch(url, {
-          headers: { "User-Agent": "AnxiousIntelligence/1.0" },
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!resp.ok) return `Fetch error: ${resp.status} ${resp.statusText}`;
-        const text = await resp.text();
-        const stripped = text
-          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"').replace(/&#x27;/g, "'")
-          .replace(/\s{3,}/g, "\n\n")
-          .trim()
-          .slice(0, 8_000);
-        return stripped || "(empty response)";
-      }
-
-      case "delegate": {
-        const { task } = input as { task: string };
-        const result = await runSubagent(task, _currentSystemPrompt, _currentSessionId);
-        const header = `[Sub-agent completed — ${result.toolsUsed} tool calls]`;
-        if (result.error) {
-          return `${header}\nError: ${result.error}\n\n${result.response}`;
-        }
-        return `${header}\n\n${result.response}`;
-      }
-
-      default:
-        return `Unknown tool: ${name}`;
-    }
+    const output = execSync(cmd, {
+      timeout,
+      maxBuffer: 1024 * 1024,
+      encoding: "utf-8",
+      cwd: resolve(process.env.HOME ?? "/tmp"),
+    });
+    return { tool_use_id: call.id, content: output.slice(0, 50000) || "(no output)" };
   } catch (err: any) {
-    return `Tool error: ${err.message}`;
+    const stderr = err.stderr?.toString() ?? "";
+    const stdout = err.stdout?.toString() ?? "";
+    return {
+      tool_use_id: call.id,
+      content: `Exit code ${err.status ?? "unknown"}\nstdout: ${stdout.slice(0, 10000)}\nstderr: ${stderr.slice(0, 10000)}`,
+      is_error: true,
+    };
+  }
+}
+
+function executeReadFile(call: ToolCall): ToolResult {
+  const path = resolve(call.input.path as string);
+  if (!existsSync(path)) {
+    return { tool_use_id: call.id, content: `File not found: ${path}`, is_error: true };
+  }
+  let content = readFileSync(path, "utf-8");
+  const limit = call.input.limit as number | undefined;
+  if (limit) {
+    content = content.split("\n").slice(0, limit).join("\n");
+  }
+  return { tool_use_id: call.id, content: content.slice(0, 100000) };
+}
+
+function executeWriteFile(call: ToolCall): ToolResult {
+  const path = resolve(call.input.path as string);
+  const content = call.input.content as string;
+  const dir = resolve(path, "..");
+  execSync(`mkdir -p "${dir}"`);
+  writeFileSync(path, content, "utf-8");
+  return { tool_use_id: call.id, content: `Written ${content.length} bytes to ${path}` };
+}
+
+function executeListFiles(call: ToolCall): ToolResult {
+  const dirPath = resolve(call.input.path as string ?? ".");
+  if (!existsSync(dirPath)) {
+    return { tool_use_id: call.id, content: `Directory not found: ${dirPath}`, is_error: true };
+  }
+  const entries = readdirSync(dirPath).map((name) => {
+    try {
+      const stat = statSync(resolve(dirPath, name));
+      return `${stat.isDirectory() ? "📁" : "📄"} ${name}${stat.isDirectory() ? "/" : ""} (${stat.size}b)`;
+    } catch {
+      return `❓ ${name}`;
+    }
+  });
+  return { tool_use_id: call.id, content: entries.join("\n") || "(empty directory)" };
+}
+
+async function executeWebSearch(call: ToolCall): Promise<ToolResult> {
+  if (!BRAVE_API_KEY) {
+    return { tool_use_id: call.id, content: "No BRAVE_SEARCH_API_KEY configured", is_error: true };
+  }
+  const q = call.input.query as string;
+  const count = Math.min(10, (call.input.count as number) ?? 5);
+  const resp = await fetch(
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}`,
+    { headers: { "X-Subscription-Token": BRAVE_API_KEY, Accept: "application/json" } },
+  );
+  if (!resp.ok) return { tool_use_id: call.id, content: `Search error: ${resp.status}`, is_error: true };
+  const data = await resp.json() as any;
+  const results = (data.web?.results ?? []).map((r: any) =>
+    `**${r.title}**\n${r.url}\n${r.description ?? ""}\n`,
+  );
+  return { tool_use_id: call.id, content: results.join("\n") || "No results" };
+}
+
+async function executeWebFetch(call: ToolCall): Promise<ToolResult> {
+  const url = call.input.url as string;
+  const maxChars = (call.input.max_chars as number) ?? 10000;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "AnxiousIntelligence/0.1" },
+      signal: AbortSignal.timeout(15000),
+    });
+    const text = await resp.text();
+    // Simple HTML to text
+    const cleaned = text
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return { tool_use_id: call.id, content: cleaned.slice(0, maxChars) };
+  } catch (err) {
+    return { tool_use_id: call.id, content: `Fetch error: ${err}`, is_error: true };
+  }
+}
+
+async function executeQueryBeliefs(call: ToolCall): Promise<ToolResult> {
+  // Query our own API
+  const what = call.input.what as string;
+  const endpoint = {
+    beliefs: "/api/beliefs",
+    dissatisfaction: "/api/dissatisfaction",
+    graph: "/api/graph",
+    revisions: "/api/revisions?limit=5",
+  }[what] ?? "/api/overview";
+
+  try {
+    const port = process.env.PORT ?? "8080";
+    const resp = await fetch(`http://127.0.0.1:${port}${endpoint}`);
+    const data = await resp.json();
+    return { tool_use_id: call.id, content: JSON.stringify(data, null, 2).slice(0, 20000) };
+  } catch (err) {
+    return { tool_use_id: call.id, content: `Self-query error: ${err}`, is_error: true };
   }
 }

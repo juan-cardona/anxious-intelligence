@@ -4,9 +4,13 @@ Hybrid connection discovery: stored edges for fast lookups +
 LLM-driven discovery at revision time for emergent connections.
 Discovered connections are written back to the edges table,
 so the graph grows organically through revision events.
+
+Fix 003 (2026-02-28): Truncate contradictions and skip connection
+discovery for high-evidence beliefs to prevent timeout on large prompts.
 """
 
 import json
+import logging
 from uuid import UUID
 from src.models import Belief
 from src.belief_graph import (
@@ -18,6 +22,21 @@ from src.claude import call_claude_json, call_revision
 from src.prompts import connection_discovery_prompt, revision_prompt
 from src.config import CASCADE_DEPTH_LIMIT, REVISION_THRESHOLD
 from src import db
+
+logger = logging.getLogger(__name__)
+
+# When a belief has this many contradictions, skip LLM connection
+# discovery (which is slow) and go straight to revision. The evidence
+# is already overwhelming — discovery adds latency, not information.
+HIGH_EVIDENCE_THRESHOLD = 10
+
+# Maximum contradictions to include in the revision prompt.
+# The signal is usually unanimous by 5-8; sending 26 just inflates
+# the prompt and risks timeout.
+MAX_CONTRADICTIONS_IN_PROMPT = 5
+
+# Maximum stored connections to include in the revision prompt.
+MAX_CONNECTIONS_IN_PROMPT = 3
 
 
 async def discover_connections(triggered: Belief, all_beliefs: list[Belief]) -> list[dict]:
@@ -44,7 +63,8 @@ async def discover_connections(triggered: Belief, all_beliefs: list[Belief]) -> 
             "You are a belief connection analysis system. Respond only in valid JSON array.",
             prompt,
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Connection discovery failed for belief {triggered.id}: {type(e).__name__}: {e}")
         return []
 
     if not isinstance(raw, list):
@@ -81,6 +101,7 @@ async def revise_belief(belief: Belief, depth: int = 0) -> dict:
     1. Load contradiction history
     2. Get stored connections (fast path)
     3. Discover NEW connections via LLM (slow path — the emergent part)
+       SKIPPED when evidence is already overwhelming (>HIGH_EVIDENCE_THRESHOLD)
     4. Write discovered connections back to edges table
     5. Call Claude Opus for deep reconstruction
     6. Create new belief, supersede old
@@ -95,73 +116,111 @@ async def revise_belief(belief: Belief, depth: int = 0) -> dict:
     # 1. Load full contradiction history
     contradictions = await get_contradictions(belief.id, limit=50)
     contradiction_texts = [c["evidence"] for c in contradictions]
+    total_contradictions = len(contradiction_texts)
+
+    logger.info(f"Revising belief {belief.id}: {total_contradictions} contradictions, tension={belief.tension:.2f}")
 
     # 2. Get STORED connections (fast path — previously discovered edges)
     stored_connected = await get_connected_beliefs(belief.id, hops=1)
     stored_texts = [
-        f"[stored] {b.content} (conf={b.confidence:.2f}, tension={b.tension:.2f}, relation=stored)"
+        f"[stored] {b.content[:150]} (conf={b.confidence:.2f}, tension={b.tension:.2f}, relation=stored)"
         for b in stored_connected
     ]
 
     # 3. DISCOVER new connections via LLM (the emergent part)
+    #    Skip for high-evidence beliefs — the evidence is already overwhelming,
+    #    and the extra LLM call risks timeout on large prompts.
     all_beliefs = await get_active_beliefs()
-    discovered = await discover_connections(belief, all_beliefs)
+    discovered = []
+    
+    if total_contradictions < HIGH_EVIDENCE_THRESHOLD:
+        discovered = await discover_connections(belief, all_beliefs)
+    else:
+        logger.info(
+            f"Skipping connection discovery for belief {belief.id}: "
+            f"{total_contradictions} contradictions already exceed threshold of {HIGH_EVIDENCE_THRESHOLD}"
+        )
 
     # 4. Write discovered connections back to edges table
-    #    The graph grows organically through revision events
-    discovered_texts = []
-    newly_connected_beliefs = []
-    for disc in discovered:
-        disc_id = UUID(disc["belief_id"])
+    for conn in discovered:
+        try:
+            await connect_beliefs(
+                belief.id, UUID(conn["belief_id"]),
+                conn["relation"], conn["strength"],
+            )
+        except Exception:
+            pass  # Duplicate edges, etc.
 
-        # Write edge (upsert — might upgrade an existing weak connection)
-        await connect_beliefs(
-            belief.id, disc_id, disc["relation"], disc["strength"],
-            method="llm_revision", reasoning=disc["reasoning"][:500],
-        )
-
-        discovered_texts.append(
-            f"[discovered] {disc['belief_content']} "
-            f"(relation={disc['relation']}, strength={disc['strength']:.2f}) "
-            f"— {disc['reasoning']}"
-        )
-
-        # Track for cascading
-        disc_belief = await get_belief(disc_id)
-        if disc_belief and disc_belief.is_active:
-            newly_connected_beliefs.append(disc_belief)
+    discovered_texts = [
+        f"[discovered] {d['belief_content']} (relation={d['relation']}, strength={d['strength']:.2f}) — {d['reasoning']}"
+        for d in discovered
+    ]
 
     # 5. Call Claude Opus for deep reconstruction
+    #    TRUNCATE inputs to prevent timeout on large prompts.
+    #    The signal is usually unanimous by 5-8 contradictions.
+    truncated_contradictions = contradiction_texts[:MAX_CONTRADICTIONS_IN_PROMPT]
+    truncated_stored = stored_texts[:MAX_CONNECTIONS_IN_PROMPT]
+    truncated_discovered = discovered_texts[:MAX_CONNECTIONS_IN_PROMPT]
+    
+    if total_contradictions > MAX_CONTRADICTIONS_IN_PROMPT:
+        truncated_contradictions.append(
+            f"[{total_contradictions - MAX_CONTRADICTIONS_IN_PROMPT} more contradictions omitted — "
+            f"all {total_contradictions} point in the same direction]"
+        )
+
     prompt = revision_prompt(
         belief=belief.content,
         confidence=belief.confidence,
         tension=belief.tension,
-        contradictions=contradiction_texts,
-        stored_connections=stored_texts,
-        discovered_connections=discovered_texts,
+        contradictions=truncated_contradictions,
+        stored_connections=truncated_stored,
+        discovered_connections=truncated_discovered,
     )
+
+    logger.info(f"Revision prompt for belief {belief.id}: {len(prompt)} chars")
 
     try:
         result = await call_revision(
-            "You are performing a deep belief revision. Respond in valid JSON only.",
+            "You are a belief revision system performing a structural self-model update. Respond ONLY in valid JSON.",
             prompt,
         )
     except Exception as e:
-        return {"status": "error", "error": str(e), "belief_id": str(belief.id)}
+        logger.error(f"Revision LLM call FAILED for belief {belief.id}: {type(e).__name__}: {e}")
+        return {
+            "status": "revision_failed",
+            "belief_id": str(belief.id),
+            "error": f"{type(e).__name__}: {e}",
+            "contradictions_count": total_contradictions,
+            "prompt_length": len(prompt),
+        }
 
-    # 6. Create the new belief, supersede the old
+    if not isinstance(result, dict) or "revised_belief" not in result:
+        logger.error(f"Revision returned invalid result for belief {belief.id}: {type(result)}")
+        return {
+            "status": "revision_invalid_response",
+            "belief_id": str(belief.id),
+            "raw_result": str(result)[:500],
+        }
+
+    # 6. Create new belief, supersede old
     new_belief = await create_belief(
-        content=result.get("revised_belief", belief.content),
+        content=result["revised_belief"],
         domain=belief.domain,
-        confidence=min(1.0, max(0.0, float(result.get("confidence", 0.5)))),
-        importance=belief.importance,
+        confidence=min(1.0, max(0.0, float(result.get("confidence", 0.6)))),
     )
     await supersede_belief(belief.id, new_belief.id)
 
-    # Transfer connections to new belief (both stored and discovered)
-    all_connected = {b.id: b for b in stored_connected}
-    for b in newly_connected_beliefs:
+    logger.info(f"Belief {belief.id} revised → {new_belief.id}: {result['revised_belief'][:100]}...")
+
+    # Transfer connections from old belief to new belief
+    all_connected = {}
+    for b in stored_connected:
         all_connected[b.id] = b
+    for conn in discovered:
+        for b in all_beliefs:
+            if str(b.id) == conn["belief_id"]:
+                all_connected[b.id] = b
 
     for conn_belief in all_connected.values():
         await connect_beliefs(new_belief.id, conn_belief.id, "supports", 0.5)
@@ -239,8 +298,16 @@ async def revise_all_triggered(beliefs: list[Belief]) -> list[dict]:
     for belief in beliefs:
         current = await get_belief(belief.id)
         if current and current.is_active and current.tension >= REVISION_THRESHOLD:
-            result = await revise_belief(current)
-            results.append(result)
+            try:
+                result = await revise_belief(current)
+                results.append(result)
+            except Exception as e:
+                logger.error(f"revise_all_triggered: revision failed for belief {belief.id}: {type(e).__name__}: {e}")
+                results.append({
+                    "status": "revision_exception",
+                    "belief_id": str(belief.id),
+                    "error": str(e),
+                })
     return results
 
 

@@ -428,7 +428,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
             broadcast("revision", rev);
             log("info", "revision", `Phase transition: ${rev.old_belief?.slice(0, 40)} → ${rev.new_belief?.slice(0, 40)}`);
           },
-          (event, data) => sendEvent(event, data),
+          { useTools: true },
         );
 
         sendEvent("response", {
@@ -644,6 +644,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     }
 
     // ════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════
     // DASHBOARD SPA
     // ════════════════════════════════════════════════════════
     if (path === "/" || path === "/dashboard" || path === "/dashboard/") {
@@ -698,6 +699,8 @@ function handleWsMessage(client: WsClient, raw: string) {
 
 export function startServer() {
   getPool();
+  
+  // Ensure impact tracking tables exist
 
   const server = createServer(handleRequest);
 

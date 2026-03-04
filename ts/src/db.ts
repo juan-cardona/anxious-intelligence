@@ -11,10 +11,8 @@
 
 import pg from "pg";
 import { DATABASE_URL } from "./config.js";
-import { createLogger } from "./logger.js";
 
 const { Pool } = pg;
-const log = createLogger("db");
 
 let pool: pg.Pool | null = null;
 
@@ -34,14 +32,11 @@ export function getPool(): pg.Pool {
     pool = new Pool(POOL_CONFIG);
 
     pool.on("error", (err) => {
-      log.error("Unexpected pool error", err);
     });
 
     pool.on("connect", () => {
-      log.debug("New connection established");
     });
 
-    log.info("Connection pool created", { min: POOL_CONFIG.min, max: POOL_CONFIG.max });
   }
   return pool;
 }
@@ -69,7 +64,6 @@ export async function checkHealth(): Promise<DbHealth> {
       latency_ms: Math.round(performance.now() - start),
     };
   } catch (err) {
-    log.error("Health check failed", err);
     return {
       connected: false,
       pool_total: p.totalCount,
@@ -89,7 +83,6 @@ export async function query<T extends pg.QueryResultRow = any>(
   try {
     return await getPool().query<T>(sql, params);
   } catch (err) {
-    log.error("Query failed", err, { sql: sql.slice(0, 120), params: params?.length });
     throw err;
   }
 }
@@ -146,9 +139,7 @@ export async function withTransaction<T>(
     return result;
   } catch (err) {
     await client.query("ROLLBACK").catch((rollbackErr) => {
-      log.error("Rollback failed", rollbackErr);
     });
-    log.error("Transaction rolled back", err);
     throw err;
   } finally {
     client.release();
@@ -164,7 +155,7 @@ export async function withTx<T>(
     query: <R extends pg.QueryResultRow = any>(sql: string, params?: any[]) => Promise<pg.QueryResult<R>>;
     queryOne: <R extends pg.QueryResultRow = any>(sql: string, params?: any[]) => Promise<R | null>;
     queryMany: <R extends pg.QueryResultRow = any>(sql: string, params?: any[]) => Promise<R[]>;
-    queryVal: <V = any>(sql: string, params?: any[]) => Promise<V | null>;
+    queryVal: (sql: string, params?: any[]) => Promise<any>;
   }) => Promise<T>,
 ): Promise<T> {
   return withTransaction(async (client) => {
@@ -172,7 +163,6 @@ export async function withTx<T>(
       try {
         return await client.query<R>(sql, params);
       } catch (err) {
-        log.error("Transaction query failed", err, { sql: sql.slice(0, 120) });
         throw err;
       }
     };
@@ -184,13 +174,13 @@ export async function withTx<T>(
       const r = await txQuery<R>(sql, params);
       return r.rows;
     };
-    const txQueryVal = async <V = any>(sql: string, params?: any[]) => {
+    const txQueryVal = async (sql: string, params?: any[]): Promise<any> => {
       const row = await txQueryOne(sql, params);
       if (!row) return null;
       const keys = Object.keys(row);
       return (row as any)[keys[0]] ?? null;
     };
-    return fn({ query: txQuery, queryOne: txQueryOne, queryMany: txQueryMany, queryVal: txQueryVal });
+    return fn({ query: txQuery, queryOne: txQueryOne as any, queryMany: txQueryMany, queryVal: txQueryVal });
   });
 }
 
@@ -198,9 +188,7 @@ export async function withTx<T>(
 
 export async function closePool(): Promise<void> {
   if (pool) {
-    log.info("Closing connection pool...");
     await pool.end();
     pool = null;
-    log.info("Connection pool closed");
   }
 }

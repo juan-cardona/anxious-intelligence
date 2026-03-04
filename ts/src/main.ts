@@ -9,7 +9,6 @@
 import { startServer } from "./server.js";
 import { startTelegram } from "./channels/telegram.js";
 import { startDiscord } from "./channels/discord.js";
-import { startAutonomousLoop } from "./autonomous.js";
 import { seedBeliefs } from "./belief-graph.js";
 import { getPool } from "./db.js";
 
@@ -42,7 +41,6 @@ async function main() {
   }
 
   // Start autonomous belief-driven loop
-  startAutonomousLoop();
 
   console.log("");
 }

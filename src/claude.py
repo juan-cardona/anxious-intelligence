@@ -1,8 +1,11 @@
 """Claude API client via Azure AI Foundry."""
 
 import json
+import logging
 import httpx
 from src.config import ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, MODEL_FAST, MODEL_REVISION
+
+logger = logging.getLogger(__name__)
 
 
 async def call_claude(
@@ -14,7 +17,7 @@ async def call_claude(
     """Call Claude API and return the text response."""
     model = model or MODEL_FAST
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(
             f"{ANTHROPIC_BASE_URL}v1/messages",
             headers={
@@ -41,9 +44,10 @@ async def call_claude_json(
     system: str,
     user_message: str,
     model: str | None = None,
+    max_tokens: int = 4096,
 ) -> dict | list:
     """Call Claude and parse the response as JSON."""
-    text = await call_claude(system, user_message, model=model)
+    text = await call_claude(system, user_message, model=model, max_tokens=max_tokens)
 
     # Strip markdown code fences if present
     text = text.strip()
@@ -55,5 +59,9 @@ async def call_claude_json(
 
 
 async def call_revision(system: str, user_message: str) -> dict:
-    """Call Claude with the revision model (Opus) for deep reconstruction."""
-    return await call_claude_json(system, user_message, model=MODEL_REVISION)
+    """Call Claude with the revision model (Opus) for deep reconstruction.
+    
+    Uses reduced max_tokens (2048) to prevent long generation times
+    on Azure-hosted endpoints where Opus can be slow.
+    """
+    return await call_claude_json(system, user_message, model=MODEL_REVISION, max_tokens=2048)

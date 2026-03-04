@@ -8,9 +8,7 @@
  */
 
 import { queryOne, queryMany } from "./db.js";
-import { createLogger } from "./logger.js";
 
-const log = createLogger("dissatisfaction");
 
 // ── Cache ─────────────────────────────────────────────────────────
 
@@ -51,7 +49,6 @@ export async function computeDissatisfaction(): Promise<number> {
     cacheTimestamp = now;
     return value;
   } catch (err) {
-    log.error("Failed to compute dissatisfaction", err);
     return cachedValue ?? 0; // Return stale value or 0
   }
 }
@@ -82,7 +79,6 @@ export async function getDissatisfactionBreakdown(): Promise<DissatisfactionBrea
        FROM belief_density ORDER BY contribution DESC`,
     );
   } catch (err) {
-    log.error("Failed to get dissatisfaction breakdown", err);
     return [];
   }
 }
